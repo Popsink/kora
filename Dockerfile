@@ -2,7 +2,7 @@
 FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
 
 # -- Builder: static musl binary via xx-cargo --
-FROM --platform=$BUILDPLATFORM rust:1.95-alpine AS builder
+FROM --platform=$BUILDPLATFORM rust:1.96-alpine AS builder
 COPY --from=xx / /
 RUN apk add clang cmake lld
 RUN rustup target add $(xx-cargo --print-target-triple)
