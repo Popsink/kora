@@ -4,9 +4,9 @@ description: Confluent-compatible Schema Registry backed by PostgreSQL
 type: application
 version: 0.0.0-dev
 appVersion: 0.0.0-dev
-home: https://github.com/Romderful/kora
+home: https://github.com/Popsink/kora
 sources:
-  - https://github.com/Romderful/kora
+  - https://github.com/Popsink/kora
 maintainers:
   - name: Romderful
     url: https://github.com/Romderful

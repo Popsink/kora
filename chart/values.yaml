@@ -28,7 +28,7 @@ extraDeploy: []
 ## @param image.pullSecrets Kora image pull secrets
 image:
   registry: ghcr.io
-  repository: romderful/kora
+  repository: Popsink/kora
   tag: ""
   digest: ""
   pullPolicy: IfNotPresent

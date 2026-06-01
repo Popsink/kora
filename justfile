@@ -1,6 +1,6 @@
 set dotenv-load
 
-image     := env("KORA_IMAGE", "ghcr.io/romderful/kora")
+image     := env("KORA_IMAGE", "ghcr.io/Popsink/kora")
 platforms := "linux/amd64,linux/arm64"
 pg_ready := "docker compose exec -T postgres pg_isready -U $POSTGRES_USER > /dev/null 2>&1"
 db_ready := "docker compose exec -T postgres psql -U $POSTGRES_USER -d $POSTGRES_DB -c 'SELECT 1' > /dev/null 2>&1"
