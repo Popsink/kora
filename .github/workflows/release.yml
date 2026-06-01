@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/romderful/kora
-  CHART: oci://ghcr.io/romderful/kora/charts
+  IMAGE: ghcr.io/Popsink/kora
+  CHART: oci://ghcr.io/Popsink/kora/charts
 
 jobs:
   release-plz:

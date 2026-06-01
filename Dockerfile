@@ -23,7 +23,7 @@ RUN mkdir -p /image && \
 # -- Runtime: Alpine + tini --
 FROM alpine:3.23
 
-LABEL org.opencontainers.image.source="https://github.com/Romderful/Kora" \
+LABEL org.opencontainers.image.source="https://github.com/Popsink/Kora" \
       org.opencontainers.image.description="Kora — Confluent-compatible Schema Registry" \
       org.opencontainers.image.licenses="MIT"
 

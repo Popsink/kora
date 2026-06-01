@@ -7,7 +7,7 @@
 PostgreSQL storage · Single binary · Sub-millisecond lookups · Zero JVM overhead
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![ghcr.io](https://img.shields.io/badge/ghcr.io-romderful%2Fkora-blue?logo=docker)](https://github.com/Romderful/kora/pkgs/container/kora)
+[![ghcr.io](https://img.shields.io/badge/ghcr.io-Popsink%2Fkora-blue?logo=docker)](https://github.com/Popsink/kora/pkgs/container/kora)
 
 </div>
 
@@ -31,7 +31,7 @@ services:
     image: postgres:17-alpine
     environment: { POSTGRES_DB: kora, POSTGRES_USER: kora, POSTGRES_PASSWORD: kora }
   kora:
-    image: ghcr.io/romderful/kora:latest
+    image: ghcr.io/Popsink/kora:latest
     depends_on: [postgres]
     environment: { DATABASE_URL: "postgres://kora:kora@postgres:5432/kora" }
     ports: ["8080:8080"]
@@ -48,7 +48,7 @@ curl http://localhost:8080/health
 ### Helm (recommended)
 
 ```bash
-helm install kora oci://ghcr.io/romderful/kora/charts/kora \
+helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
   --set database.host=my-postgres.example.com \
   --set database.password=secret
 ```
@@ -58,7 +58,7 @@ See [`chart/README.md`](chart/README.md) for all options.
 ### Docker
 
 ```bash
-docker run -p 8080:8080 -e DATABASE_URL="postgres://user:pass@host:5432/kora" ghcr.io/romderful/kora:latest
+docker run -p 8080:8080 -e DATABASE_URL="postgres://user:pass@host:5432/kora" ghcr.io/Popsink/kora:latest
 ```
 
 ## Configuration
