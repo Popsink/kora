@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/Popsink/kora/compare/v0.3.0...v0.3.1) - 2026-06-01
+
+### Other
+
+- *(deps)* bump rust in the docker-all group ([#38](https://github.com/Popsink/kora/pull/38))
+- *(deps)* bump the rust-minor-patch group across 1 directory with 9 updates ([#39](https://github.com/Popsink/kora/pull/39))
+- *(deps)* bump azure/setup-helm from 4 to 5 in the actions-all group ([#33](https://github.com/Popsink/kora/pull/33))
+
 ## [0.3.0](https://github.com/Romderful/kora/compare/v0.2.4...v0.3.0) - 2026-04-27
 
 ### Added
