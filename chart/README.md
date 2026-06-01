@@ -11,7 +11,7 @@
 ## Quick Start
 
 ```bash
-helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
+helm install kora oci://ghcr.io/popsink/kora/charts/kora \
   --set database.host=my-postgres.example.com \
   --set database.password=secret
 ```
@@ -28,7 +28,7 @@ The auto-Secret base64-encodes the value but does not encrypt it — never commi
 ### Component mode — inline
 
 ```bash
-helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
+helm install kora oci://ghcr.io/popsink/kora/charts/kora \
   --set database.host=postgres.example.com \
   --set database.password=secret
 ```
@@ -38,7 +38,7 @@ helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
 Suits ExternalSecrets Operator, CloudNativePG, AWS RDS via ESO, Vault, etc.
 
 ```bash
-helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
+helm install kora oci://ghcr.io/popsink/kora/charts/kora \
   --set database.host=postgres.example.com \
   --set database.existingSecret=kora-db-credentials
 ```
@@ -48,7 +48,7 @@ Override the key with `--set database.secretKeys.password=db-password` if it isn
 ### URL mode — inline
 
 ```bash
-helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
+helm install kora oci://ghcr.io/popsink/kora/charts/kora \
   --set database.url="postgres://kora:secret@pg:5432/kora?sslmode=require"
 ```
 
@@ -58,7 +58,7 @@ helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
 kubectl create secret generic kora-db \
   --from-literal=DATABASE_URL="postgres://kora:secret@pg:5432/kora?sslmode=require"
 
-helm install kora oci://ghcr.io/Popsink/kora/charts/kora \
+helm install kora oci://ghcr.io/popsink/kora/charts/kora \
   --set database.existingSecret=kora-db \
   --set database.secretKeys.url=DATABASE_URL
 ```

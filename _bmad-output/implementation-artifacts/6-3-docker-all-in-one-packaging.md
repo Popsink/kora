@@ -82,17 +82,17 @@ so that I can deploy with zero external dependencies.
   - [x] 7.5: Versioning via tag parameter: `just release v0.4.0`
 
 - [x] Task 8: Container registry setup (AC: 4)
-  - [x] 8.1: Registry: `ghcr.io/Popsink/kora`
+  - [x] 8.1: Registry: `ghcr.io/popsink/kora`
   - [x] 8.2: OCI labels: `image.source`, `image.description`, `image.licenses` → auto-links to GitHub repo
   - [x] 8.3: `--provenance=false` to avoid "unknown" platform entries
   - [x] 8.4: buildx builder (`kora-builder`, driver `docker-container`) + QEMU for arm64 emulation
 
 - [x] Task 9: End-to-end smoke tests from ghcr.io (AC: 1, 2, 3, 4)
-  - [x] 9.1: `docker pull ghcr.io/Popsink/kora:latest-embedded` — success
-  - [x] 9.2: `docker pull ghcr.io/Popsink/kora:latest` — success
+  - [x] 9.1: `docker pull ghcr.io/popsink/kora:latest-embedded` — success
+  - [x] 9.2: `docker pull ghcr.io/popsink/kora:latest` — success
   - [x] 9.3: Image sizes: slim ~24MB, embedded ~73MB
-  - [x] 9.4: Embedded: `docker run -p 8080:8080 ghcr.io/Popsink/kora:latest-embedded` → PG auto-init, health UP, register Avro/JSON/Protobuf, schema evolution, compatibility test, soft delete + ID still resolvable, metrics
-  - [x] 9.5: Slim + external PG: `docker run -e DATABASE_URL=... ghcr.io/Popsink/kora:latest` → health UP, register + query, PG tables verified via psql (6 tables, rows correct)
+  - [x] 9.4: Embedded: `docker run -p 8080:8080 ghcr.io/popsink/kora:latest-embedded` → PG auto-init, health UP, register Avro/JSON/Protobuf, schema evolution, compatibility test, soft delete + ID still resolvable, metrics
+  - [x] 9.5: Slim + external PG: `docker run -e DATABASE_URL=... ghcr.io/popsink/kora:latest` → health UP, register + query, PG tables verified via psql (6 tables, rows correct)
   - [x] 9.6: Graceful shutdown: `docker stop` → exit code 0 on both images
   - [x] 9.7: Data persistence: `-v kora-data:/var/lib/postgresql/data` → schema survives container restart
   - [x] 9.8: Multi-arch: both tags on ghcr.io with amd64 + arm64 manifests, no "unknown" entries
@@ -135,7 +135,7 @@ The `$BUILDPLATFORM` / `$TARGETPLATFORM` args are injected by Docker BuildKit. A
 
 ### Container Registry (ghcr.io)
 
-Two images published to `ghcr.io/Popsink/kora`:
+Two images published to `ghcr.io/popsink/kora`:
 
 | Tag | Content | Use case |
 |---|---|---|
