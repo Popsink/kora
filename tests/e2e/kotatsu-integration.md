@@ -194,7 +194,7 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
   of schema evolution and the most valuable assertion of the scenario.
 
 ### KKI-EVO-003 — Both versions visible in the Schemas tab — `P2`
-- **Steps:** `curl -sk "$K/schemas/<subject>" | jq '{version, id, type}'` and the
+- **Steps:** `curl -sk "$K/schemas/<subject>" | jq '{versions, latest: (.latest | {id, version, schemaType})}'` and the
   `/schemas/{subject}` UI page.
 - **Expected:** the subject reports the latest version (≥2) while older events still map
   to earlier ids; type stays `AVRO`.
@@ -206,10 +206,17 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
 > **Proves:** a translator outage degrades gracefully — Kotatsu stays up, shows hex + a
 > clear error, and recovers when Kora returns. A Kora failure must never crash the browser.
 
-> **Precondition / known blocker:** these need Kora scaled down in the `kafka` namespace,
-> e.g. `kubectl -n kafka scale deploy/kora --replicas=0` (restore with `--replicas=1`).
-> **`kubectl` is not yet on PATH locally** — it is wrapped by the data-plane (`tasks`
-> `KUBECTL` constant). **TODO: confirm the exact invocation before executing this block.**
+> **Precondition (blocker resolved 2026-06-11):** these need Kora scaled down in the
+> `kafka` namespace. No local `kubectl` exists; go **through the Kind node container**,
+> which ships its own kubectl + admin kubeconfig:
+>
+> ```bash
+> # scale down / up
+> docker exec -i popsink-data-plane-dev-control-plane \
+>   kubectl --kubeconfig /etc/kubernetes/admin.conf -n kafka scale deploy/kora --replicas=0
+> docker exec -i popsink-data-plane-dev-control-plane \
+>   kubectl --kubeconfig /etc/kubernetes/admin.conf -n kafka scale deploy/kora --replicas=1
+> ```
 
 ### KKI-RES-001 — With Kora down, events show hex + error, UI survives — `P1`
 - **Steps:** scale Kora to 0 → in Kotatsu **Search** `$TOPIC` (use a fresh fetch; cached
@@ -266,22 +273,22 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
 
 | Case | Pri | Proves | Pass? |
 |---|:--:|---|:--:|
-| KKI-DEC-001 | P1 | Avro event → readable JSON | ☐ |
-| KKI-DEC-002 | P1 | Event id resolves to a real subject | ☐ |
-| KKI-DEC-003 | P2 | Whole partition decodes (0 hex) | ☐ |
-| KKI-DEC-004 | P2 | Non-Avro key not force-decoded | ☐ |
-| KKI-DEC-005 | P3 | Logical types stay readable | ☐ |
+| KKI-DEC-001 | P1 | Avro event → readable JSON | ✅ 2026-06-11 |
+| KKI-DEC-002 | P1 | Event id resolves to a real subject | ✅ 2026-06-11 |
+| KKI-DEC-003 | P2 | Whole partition decodes (0 hex) | ✅ 2026-06-11 |
+| KKI-DEC-004 | P2 | Non-Avro key not force-decoded | ✅ 2026-06-11 |
+| KKI-DEC-005 | P3 | Logical types stay readable | ✅ 2026-06-11 |
 | KKI-EVO-001 | P1 | New events use the new version | ☐ |
 | KKI-EVO-002 | P1 | Old events still readable (no regression) | ☐ |
 | KKI-EVO-003 | P2 | Both versions visible | ☐ |
-| KKI-RES-001 | P1 | Kora down → hex + error, UI alive | ☐ |
-| KKI-RES-002 | P1 | Schemas tab degrades cleanly | ☐ |
-| KKI-RES-003 | P1 | Decode resumes after recovery | ☐ |
-| KKI-RES-004 | P3 | Unknown id behaves like outage | ☐ |
-| KKI-SCH-001 | P1 | Schemas list mirrors Kora | ☐ |
-| KKI-SCH-002 | P1 | Subject detail matches Kora | ☐ |
-| KKI-SCH-003 | P2 | Registry URL is the cluster Kora | ☐ |
-| KKI-SCH-004 | P3 | Unknown subject errors cleanly | ☐ |
+| KKI-RES-001 | P1 | Kora down → hex + error, UI alive | ⚠️ FAIL partial 2026-06-11 (ANO-1, ANO-2) |
+| KKI-RES-002 | P1 | Schemas tab degrades cleanly | ✅ 2026-06-11 |
+| KKI-RES-003 | P1 | Decode resumes after recovery | ✅ 2026-06-11 |
+| KKI-RES-004 | P3 | Unknown id behaves like outage | ⏭ skipped (needs subject hard-delete; reference data irreplaceable until a source pipeline is re-provisioned) |
+| KKI-SCH-001 | P1 | Schemas list mirrors Kora | ✅ 2026-06-11 |
+| KKI-SCH-002 | P1 | Subject detail matches Kora | ✅ 2026-06-11 |
+| KKI-SCH-003 | P2 | Registry URL is the cluster Kora | ✅ 2026-06-11 |
+| KKI-SCH-004 | P3 | Unknown subject errors cleanly | ✅ 2026-06-11 |
 
 ---
 
@@ -291,8 +298,34 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
   `response.status()` and the parsed body; each UI step maps to `page.goto` +
   `getByRole('button',{name:/search/i}).click()` + assertions on the rendered rows. The
   `value.kind` checks become the primary `expect(...)`.
-- **Blocker — scenario 3:** needs the kubectl invocation used by the data-plane to scale
-  the `kora` deployment. Resolve before running `RES` cases.
+- **Blocker — scenario 3: resolved** (2026-06-11): use the Kind node's embedded kubectl
+  via `docker exec` (see scenario 3 precondition).
+- **Blocker — scenario 2 (EVO):** the source Postgres that produced the reference events
+  (db `popsink_source`, connector `e2e-source-pg`) **no longer exists** — it is not on the
+  cluster's `postgresql-0` (only `data_plane`, `control_plane`, `kora`… databases) and no
+  other container is present. No CDC pipeline is currently running (no `workers` pods);
+  the reference events are S3 leftovers from a previous session. EVO needs either a
+  re-provisioned source + pipeline (full chain) or synthetic v2 Avro events produced
+  straight to Tansu (strict Kora↔Kotatsu scope).
+- **Findings — KKI-RES-001 (2026-06-11), verdict FAIL partial.** Structural resilience
+  holds (HTTP 200, hex fallback, keys/offsets intact, no crash, clean recovery), but:
+  - **ANO-1 — hex fallback carries no diagnostic** (filed as [data-plane#2650](https://github.com/Popsink/data-plane/issues/2650)). With Kora down, affected events
+    come back as `{kind:"hex", data}` — **no `schemaId`, no `error`**. Root cause: the
+    deployed image is `ghcr.io/popsink/kotatsu:0.1.0`, whose `decode_field` silently
+    falls through to `raw_field` on registry failure. The diagnostic path
+    (`{kind:"hex", schemaId, error:"schema id N: …"}`) exists since v0.2.0
+    (commit `8aedf61`). **Recommendation:** bump the kotatsu image in the data-plane
+    deployment to ≥0.2.0, then re-run this case.
+  - **ANO-2 — registry client has no timeout** (filed as [kotatsu#55](https://github.com/Popsink/kotatsu/issues/55)). `SchemaRegistry` uses
+    `reqwest::Client::new()` (no timeout, no negative caching) — `schema.rs:77`, present
+    in 0.1.0 **and** current HEAD. With Kora's Service blackholed, message fetches
+    intermittently hang **~25-30 s** (UI stuck on "Loading…", no feedback); other runs
+    fail instantly (502 in 0.17 s on `/api/schemas`). **Recommendation:** set a short
+    client timeout (1-2 s) and consider briefly caching fetch failures.
+- **Minor observation (KKI-SCH-004 + KKI-RES-002, 2026-06-11):** error messages leak
+  internal registry routes/URLs (404: `subject '/subjects/<name>/versions' not found`;
+  502: full in-cluster Kora URL). Cosmetic; filed as
+  [kotatsu#56](https://github.com/Popsink/kotatsu/issues/56).
 - **Caching caveat (scenario 3):** Kotatsu caches resolved schemas (ids are immutable),
   so an already-fetched id may still decode after Kora goes down. Use a not-yet-fetched
   topic/id, or a fresh session, to observe the outage path honestly.
