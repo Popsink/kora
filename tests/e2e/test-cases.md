@@ -1,4 +1,12 @@
-# Kora — End-to-End Test Case Catalogue
+# Kora — Schema Registry API Reference Catalogue
+
+> **📌 Scope note (read first):** this catalogue covers **Kora in isolation** — its
+> Schema Registry REST API. It largely overlaps the developer's own unit/integration
+> tests, so it is kept as a **reference annex**, not the primary QA deliverable. The
+> primary e2e work is the **Kora ↔ Kotatsu integration** suite in
+> [`kotatsu-integration.md`](./kotatsu-integration.md), which tests the live chain from
+> the outside (the layer unit tests don't cover). Use this file to look up Kora's
+> endpoints and error codes; use `kotatsu-integration.md` to test what users actually see.
 
 > **Status:** Living document — functional specification of expected behaviour, written
 > first; automation comes later (see issue *"QA: end-to-end test case catalogue"*).
