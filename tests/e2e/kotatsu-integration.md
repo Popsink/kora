@@ -271,6 +271,12 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
 
 ## 9. Execution checklist
 
+> **2026-06-15 environment note:** reference Avro data on both `…public.items` topics has
+> been purged (records gone, watermark still reads 25/30 — see ANO-3 in §10). The 2026-06-11
+> ✅ results below were valid that day but are **not currently reproducible**: DEC, RES-001
+> and EVO need Avro data regenerated first. Kotatsu is now `0.2.1`, so RES-001 (ANO-1) is
+> ready to re-test the moment data returns.
+
 | Case | Pri | Proves | Pass? |
 |---|:--:|---|:--:|
 | KKI-DEC-001 | P1 | Avro event → readable JSON | ✅ 2026-06-11 |
@@ -281,9 +287,9 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
 | KKI-EVO-001 | P1 | New events use the new version | ☐ |
 | KKI-EVO-002 | P1 | Old events still readable (no regression) | ☐ |
 | KKI-EVO-003 | P2 | Both versions visible | ☐ |
-| KKI-RES-001 | P1 | Kora down → hex + error, UI alive | ⚠️ FAIL partial 2026-06-11 (ANO-1, ANO-2) |
-| KKI-RES-002 | P1 | Schemas tab degrades cleanly | ✅ 2026-06-11 |
-| KKI-RES-003 | P1 | Decode resumes after recovery | ✅ 2026-06-11 |
+| KKI-RES-001 | P1 | Kora down → hex + error, UI alive | ✅ 2026-06-15 (ANO-1 & ANO-2 fixed in 0.2.1; see ui-deep-dive) |
+| KKI-RES-002 | P1 | Schemas tab degrades cleanly | ✅ 2026-06-11 · re-confirmed 2026-06-15 (no URL leak) |
+| KKI-RES-003 | P1 | Decode resumes after recovery | ✅ 2026-06-11 · re-confirmed 2026-06-15 |
 | KKI-RES-004 | P3 | Unknown id behaves like outage | ⏭ skipped (needs subject hard-delete; reference data irreplaceable until a source pipeline is re-provisioned) |
 | KKI-SCH-001 | P1 | Schemas list mirrors Kora | ✅ 2026-06-11 |
 | KKI-SCH-002 | P1 | Subject detail matches Kora | ✅ 2026-06-11 |
@@ -294,6 +300,28 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
 
 ## 10. Notes & open items
 
+- **Environment update (2026-06-15):** the deployed Kotatsu image is now
+  `ghcr.io/popsink/kotatsu:0.2.1` (was `0.1.0` on 2026-06-11); Kora is `v0.3.3`. The 0.2.x
+  bump is the prerequisite ANO-1 was waiting for — **KKI-RES-001 is now re-runnable**, but
+  only once decodable Avro data exists again (see the data-loss finding below).
+- **Findings — reference Avro data lost to retention (2026-06-15), verdict FAIL / blocker
+  + new defect ANO-3.** Attempting to re-run scenario 1 (DEC) found **zero readable events**
+  on both `…public.items` topics: `GET …/messages` returns `count:0, scanned:0,
+  exhausted:true` while `watermark.high` still reads **25** / **30**. Cross-checked on the
+  RustFS S3 backend (bucket `tansu`, endpoint `rustfs-svc.rustfs.svc.cluster.local:9000`):
+  both `…public.items` partitions hold **only `watermark.json` and no `records/` directory
+  (0 batches)**, whereas every compacted `connect.*` topic still has its `records/*.batch`
+  files. Root cause (hypothesis): the CDC `public.items` topics use a time-based *delete*
+  retention policy and their record batches have aged out, while the watermark metadata
+  survives the purge. With no source pipeline to regenerate them, the reference events are
+  gone — DEC, RES-001 (the ANO-1 re-test), and EVO are all blocked until data is restored.
+  - **ANO-3 — phantom message count: watermark survives record purge** (to file). After the
+    record batches are deleted, Kotatsu still advertises `high:25` (topic list shows "25
+    messages") yet every fetch returns `count:0` **with no error and no empty-state hint** —
+    a user sees a non-zero counter but can never open a single message. Invisible/inconsistent
+    state, exactly the operational-gap class we hunt. **Recommendation:** reconcile the
+    displayed count with the readable `low`/available range, or surface an explicit
+    "records purged / unavailable" state instead of a silent empty result.
 - **Playwright transposition:** each curl maps to a `request.get(...)` asserting on
   `response.status()` and the parsed body; each UI step maps to `page.goto` +
   `getByRole('button',{name:/search/i}).click()` + assertions on the rendered rows. The
@@ -306,7 +334,10 @@ Priority: `P1` core product promise · `P2` important · `P3` edge.
   other container is present. No CDC pipeline is currently running (no `workers` pods);
   the reference events are S3 leftovers from a previous session. EVO needs either a
   re-provisioned source + pipeline (full chain) or synthetic v2 Avro events produced
-  straight to Tansu (strict Kora↔Kotatsu scope).
+  straight to Tansu (strict Kora↔Kotatsu scope). **Update 2026-06-15:** those leftover
+  events have since been purged (see the data-loss finding below), so this same
+  data-regeneration step now also gates DEC re-runs and the RES-001 re-test — it is the
+  single unblock for the whole remaining suite.
 - **Findings — KKI-RES-001 (2026-06-11), verdict FAIL partial.** Structural resilience
   holds (HTTP 200, hex fallback, keys/offsets intact, no crash, clean recovery), but:
   - **ANO-1 — hex fallback carries no diagnostic** (filed as [data-plane#2650](https://github.com/Popsink/data-plane/issues/2650)). With Kora down, affected events
