@@ -1,4 +1,11 @@
-# Kora — First batch: manual P1 runbook
+# Kora — First batch: manual P1 runbook (Kora API in isolation)
+
+> **📌 Scope note (read first):** this runbook tests **Kora on its own** (its REST API,
+> against a standalone Kora + local Postgres via `just dev`). It is now a **fallback /
+> reference** for exercising Kora in isolation. The primary e2e deliverable is
+> [`kotatsu-integration.md`](./kotatsu-integration.md) — the live **Kora ↔ Kotatsu**
+> chain observed from the UI. ⚠️ Running `just dev` while the data-plane stack is up
+> will conflict on port 5432; only use this runbook when the data-plane is **not** running.
 
 > **Goal:** a ready-to-run checklist of the most critical (P1) end-to-end cases from
 > [`test-cases.md`](./test-cases.md). Each step is a copy-paste `curl` command plus the
