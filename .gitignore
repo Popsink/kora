@@ -4,3 +4,5 @@
 .github/hooks/
 test-artifacts/
 chart/charts/
+migration/.venv/
+migration/audits/
