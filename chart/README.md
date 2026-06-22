@@ -123,6 +123,7 @@ resources:
 |---|---|---|
 | `kora.port` | `8080` | Listen port |
 | `kora.logLevel` | `info` | Log level (RUST_LOG) |
+| `kora.defaultCompatibility` | `""` | Default global compatibility level, re-applied to the global config on every startup (overwrites runtime `PUT`/`DELETE /config` changes). One of `BACKWARD`, `BACKWARD_TRANSITIVE`, `FORWARD`, `FORWARD_TRANSITIVE`, `FULL`, `FULL_TRANSITIVE`, `NONE`. Empty (default) lets the runtime API own it (`BACKWARD` on a fresh install) |
 | `kora.dbPoolMax` | `20` | Max DB connections |
 | `kora.maxBodySize` | `16777216` | Max request body (bytes) |
 | `kora.extraEnvVars` | `[]` | Extra env vars |

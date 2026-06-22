@@ -57,6 +57,27 @@ pub async fn set_global_level(
     .await
 }
 
+/// Reconcile the global compatibility level to `level`, returning the new value.
+///
+/// Unconditionally overwrites the global row (`subject IS NULL`); used at startup
+/// to make a declaratively-configured default (`DEFAULT_COMPATIBILITY`) the source
+/// of truth on every boot. Leaves `normalize` and all per-subject overrides
+/// untouched.
+///
+/// # Errors
+///
+/// Returns a database error on connection failure.
+pub async fn reconcile_global_level(pool: &PgPool, level: &str) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        r"UPDATE config SET compatibility_level = $1, updated_at = now()
+          WHERE subject IS NULL
+          RETURNING compatibility_level",
+    )
+    .bind(level)
+    .fetch_one(pool)
+    .await
+}
+
 /// Set the per-subject compatibility level (upsert). Returns the new value.
 ///
 /// # Errors

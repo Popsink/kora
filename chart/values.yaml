@@ -39,6 +39,7 @@ image:
 ## @param kora.dbPoolMax Maximum database connections in pool
 ## @param kora.maxBodySize Maximum request body size in bytes
 ## @param kora.logLevel Log level (RUST_LOG, e.g. info, debug, kora=trace)
+## @param kora.defaultCompatibility Default global compatibility level, re-applied to the global config on every startup (overwrites runtime PUT/DELETE /config changes; empty = runtime API owns it, BACKWARD on a fresh install). One of: BACKWARD, BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, FULL_TRANSITIVE, NONE
 ## @param kora.extraEnvVars Array with extra environment variables
 ## @param kora.extraEnvVarsCM Name of existing ConfigMap containing extra env vars
 ## @param kora.extraEnvVarsSecret Name of existing Secret containing extra env vars
@@ -47,6 +48,7 @@ kora:
   dbPoolMax: 20
   maxBodySize: 16777216
   logLevel: "info"
+  defaultCompatibility: ""
   extraEnvVars: []
   extraEnvVarsCM: ""
   extraEnvVarsSecret: ""

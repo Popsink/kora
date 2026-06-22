@@ -42,6 +42,21 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
+    // Reconcile the declaratively-configured default compatibility level into the
+    // global config row: DEFAULT_COMPATIBILITY is the source of truth on every
+    // startup, overwriting any runtime PUT/DELETE /config change to the global
+    // level. Per-subject overrides are untouched.
+    if let Some(applied) =
+        storage::apply_startup_config(&pool, cfg.default_compatibility.as_deref())
+            .await
+            .expect("failed to reconcile global compatibility level")
+    {
+        tracing::info!(
+            compatibility = %applied,
+            "reconciled global compatibility from DEFAULT_COMPATIBILITY"
+        );
+    }
+
     let app = api::router(pool, metrics_handle, cfg.max_body_size);
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr)
