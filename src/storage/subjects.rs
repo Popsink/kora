@@ -1,6 +1,6 @@
 //! Subject storage operations.
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 // -- Queries --
 
@@ -63,30 +63,38 @@ pub async fn list_subjects(
         ),
     };
 
+    // SAFETY (sqlx 0.9 `SqlSafeStr`): the only value interpolated into `sql` is
+    // `filter`, which is one of three hardcoded literals above. Everything
+    // derived from input — the LIKE pattern, offset, limit — is passed as a bind
+    // parameter, never spliced into the string. The query text contains no
+    // untrusted data, so wrapping it with `AssertSqlSafe` is sound.
     if has_like {
         let pat = like_pattern.as_deref().unwrap_or("%");
         if limit >= 0 {
-            sqlx::query_scalar(&sql)
+            sqlx::query_scalar(AssertSqlSafe(sql))
                 .bind(pat)
                 .bind(offset)
                 .bind(limit)
                 .fetch_all(pool)
                 .await
         } else {
-            sqlx::query_scalar(&sql)
+            sqlx::query_scalar(AssertSqlSafe(sql))
                 .bind(pat)
                 .bind(offset)
                 .fetch_all(pool)
                 .await
         }
     } else if limit >= 0 {
-        sqlx::query_scalar(&sql)
+        sqlx::query_scalar(AssertSqlSafe(sql))
             .bind(offset)
             .bind(limit)
             .fetch_all(pool)
             .await
     } else {
-        sqlx::query_scalar(&sql).bind(offset).fetch_all(pool).await
+        sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(offset)
+            .fetch_all(pool)
+            .await
     }
 }
 

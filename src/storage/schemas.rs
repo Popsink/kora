@@ -246,12 +246,17 @@ async fn find_existing_version(
     fingerprint: &str,
     fp_column: &str,
 ) -> Result<Option<(i64, i32)>, sqlx::Error> {
-    sqlx::query_as::<_, (i64, i32)>(&format!(
+    // SAFETY (sqlx 0.9 `SqlSafeStr`): `fp_column` is one of two hardcoded
+    // literals ("fingerprint" / "raw_fingerprint") chosen by the caller — never
+    // user input. A column name cannot be a bind parameter, so it is
+    // interpolated; the fingerprint value and subject_id are bound. The query
+    // text contains no untrusted data, so `AssertSqlSafe` is sound.
+    sqlx::query_as::<_, (i64, i32)>(sqlx::AssertSqlSafe(format!(
         r"SELECT sv.content_id, sv.version FROM schema_versions sv
               JOIN schema_contents sc ON sv.content_id = sc.id
               WHERE sv.subject_id = $1 AND sc.{fp_column} = $2 AND sv.deleted = false
               ORDER BY sv.version LIMIT 1"
-    ))
+    )))
     .bind(subject_id)
     .bind(fingerprint)
     .fetch_optional(&mut **tx)
