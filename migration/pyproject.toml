@@ -1,0 +1,9 @@
+[project]
+name = "kora-migration"
+version = "0.1.0"
+description = "Migration tooling from Karapace to Kora schema registry"
+requires-python = ">=3.11"
+dependencies = [
+    "fastavro>=1.9",
+    "psycopg2-binary>=2.9",
+]

@@ -138,6 +138,28 @@ pg-monitor:
 loadtest-stop:
     {{ loadtest_pg }} down -v
 
+# ---------- Migration ----------
+
+# Audit Karapace and produce migration/audit.json  (KARAPACE_URL, KARAPACE_USER, KARAPACE_PASSWORD)
+[group('migration')]
+migrate-audit:
+    cd migration && uv run python audit.py
+
+# Dry-run the migration — show what would be written without touching the DB  (KORA_DB_URL)
+[group('migration')]
+migrate-dry-run:
+    cd migration && uv run python migrate_direct.py --dry-run
+
+# Run the migration  (KORA_DB_URL)
+[group('migration')]
+migrate-run:
+    cd migration && uv run python migrate_direct.py
+
+# Verify Kora matches the audit snapshot  (KORA_URL, KORA_USER, KORA_PASSWORD)
+[group('migration')]
+migrate-verify:
+    cd migration && uv run python verify.py
+
 # ---------- Docker (local) ----------
 
 # Run image locally (needs DATABASE_URL)
