@@ -6,11 +6,10 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use sqlx::PgPool;
 
 use crate::api::compatibility::DefaultToGlobalParams;
 use crate::error::KoraError;
-use crate::storage::mode;
+use crate::storage::DynStorage;
 
 // -- Types --
 
@@ -56,10 +55,10 @@ pub struct ModeDeleteParams {
 ///
 /// Returns `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_global_mode(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Query(_params): Query<DefaultToGlobalParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    let m = mode::get_global_mode(&pool).await?;
+    let m = storage.get_global_mode().await?;
     Ok(Json(serde_json::json!({ "mode": m })))
 }
 
@@ -71,12 +70,12 @@ pub async fn get_global_mode(
 ///
 /// Returns `KoraError::InvalidMode` (42204) for invalid modes.
 pub async fn set_global_mode(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Query(_params): Query<ModeSetParams>,
     Json(body): Json<ModeRequest>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_mode(&body.mode)?;
-    let m = mode::set_global_mode(&pool, &body.mode).await?;
+    let m = storage.set_global_mode(&body.mode).await?;
     Ok(Json(serde_json::json!({ "mode": m })))
 }
 
@@ -88,9 +87,9 @@ pub async fn set_global_mode(
 ///
 /// Returns `KoraError::BackendDataStore` (500) for database failures.
 pub async fn delete_global_mode(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
 ) -> Result<impl IntoResponse, KoraError> {
-    let prev = mode::delete_global_mode(&pool).await?;
+    let prev = storage.delete_global_mode().await?;
     Ok(Json(serde_json::json!({ "mode": prev })))
 }
 
@@ -105,16 +104,16 @@ pub async fn delete_global_mode(
 /// Returns `KoraError::SubjectModeNotConfigured` (40409) if no per-subject mode is set
 /// and `defaultToGlobal` is not true.
 pub async fn get_subject_mode(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(subject): Path<String>,
     Query(params): Query<DefaultToGlobalParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    if let Some(m) = mode::get_subject_mode(&pool, &subject).await? {
+    if let Some(m) = storage.get_subject_mode(&subject).await? {
         return Ok(Json(serde_json::json!({ "mode": m })));
     }
 
     if params.default_to_global {
-        let m = mode::get_global_mode(&pool).await?;
+        let m = storage.get_global_mode().await?;
         Ok(Json(serde_json::json!({ "mode": m })))
     } else {
         Err(KoraError::SubjectModeNotConfigured(subject))
@@ -129,13 +128,13 @@ pub async fn get_subject_mode(
 ///
 /// Returns `KoraError::InvalidMode` (42204) for invalid modes.
 pub async fn set_subject_mode(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(subject): Path<String>,
     Query(_params): Query<ModeSetParams>,
     Json(body): Json<ModeRequest>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_mode(&body.mode)?;
-    let m = mode::set_subject_mode(&pool, &subject, &body.mode).await?;
+    let m = storage.set_subject_mode(&subject, &body.mode).await?;
     Ok(Json(serde_json::json!({ "mode": m })))
 }
 
@@ -149,14 +148,14 @@ pub async fn set_subject_mode(
 ///
 /// Returns `KoraError::SubjectNotFound` (40401) if no per-subject mode exists.
 pub async fn delete_subject_mode(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(subject): Path<String>,
     Query(params): Query<ModeDeleteParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     let prev = if params.recursive {
-        mode::delete_subject_mode_recursive(&pool, &subject).await?
+        storage.delete_subject_mode_recursive(&subject).await?
     } else {
-        mode::delete_subject_mode(&pool, &subject).await?
+        storage.delete_subject_mode(&subject).await?
     };
 
     let prev = prev.ok_or(KoraError::SubjectNotFound)?;
@@ -184,8 +183,8 @@ fn validate_mode(m: &str) -> Result<(), KoraError> {
 /// # Errors
 ///
 /// Returns `KoraError::OperationNotPermitted` (42205) or a database error.
-pub async fn enforce_writable(pool: &PgPool, subject: &str) -> Result<(), KoraError> {
-    let effective = mode::get_effective_mode(pool, subject).await?;
+pub async fn enforce_writable(storage: &DynStorage, subject: &str) -> Result<(), KoraError> {
+    let effective = storage.get_effective_mode(subject).await?;
     if WRITE_MODES.contains(&effective.as_str()) {
         Ok(())
     } else {

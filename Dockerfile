@@ -11,10 +11,15 @@ WORKDIR /usr/src
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY migrations/ migrations/
+COPY migrations_oracle/ migrations_oracle/
 
+# Optional cargo features. Pass `--build-arg CARGO_FEATURES=oracle` to produce an
+# Oracle-enabled image — still a single static musl binary, since the Oracle
+# driver (oracle-rs) is pure Rust and needs no native client libraries.
+ARG CARGO_FEATURES=""
 ARG TARGETPLATFORM
 RUN xx-apk add --no-cache musl-dev zlib-dev zlib-static gcc
-RUN xx-cargo build --release --bin kora
+RUN xx-cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin kora
 RUN xx-verify --static ./target/$(xx-cargo --print-target-triple)/release/kora
 
 RUN mkdir -p /image && \

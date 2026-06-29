@@ -55,6 +55,21 @@ test:
     fi
     cargo test --test '*' -- --include-ignored
 
+# Run the integration suite against Oracle (starts Oracle Free, tears down after).
+# No Oracle client needed — the oracle-rs driver is pure Rust.
+[group('dev')]
+test-oracle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose --profile oracle up -d oracle
+    echo "Waiting for Oracle (first boot is slow)..."
+    until docker compose exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
+    trap 'docker compose --profile oracle down' EXIT
+    DB_BACKEND=oracle DB_HOST=localhost DB_PORT="${ORACLE_PORT:-1521}" \
+      DB_USER="${DB_USER:-kora}" DB_PASSWORD="${DB_PASSWORD:-kora}" DB_NAME=FREEPDB1 \
+      DATABASE_URL= DB_POOL_MAX=2 \
+      cargo test --features oracle --test '*' -- --include-ignored --test-threads=4
+
 # fmt + lint + test (CI entrypoint)
 [group('quality')]
 ci: fmt lint test

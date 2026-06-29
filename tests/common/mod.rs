@@ -86,12 +86,50 @@ pub fn database_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL must be set — run via `just test`")
 }
 
-/// Create a PG pool with migrations applied.
+/// True when the configured backend is Oracle. White-box tests that issue raw
+/// `PostgreSQL` SQL against [`pool`] guard on this and skip on Oracle; the
+/// black-box HTTP tests run against whichever backend is configured.
+pub fn backend_is_oracle() -> bool {
+    if std::env::var("DB_BACKEND").is_ok_and(|v| v.eq_ignore_ascii_case("oracle")) {
+        return true;
+    }
+    std::env::var("DATABASE_URL").is_ok_and(|v| v.starts_with("oracle:"))
+}
+
+/// Create a `PostgreSQL` pool with migrations applied — for `PostgreSQL`-specific
+/// white-box tests that query the schema directly.
 pub async fn pool() -> sqlx::PgPool {
     kora::storage::create_pool(&database_url(), 10)
         .await
         .expect("database should be reachable")
 }
+
+/// Build the configured storage backend (Postgres or Oracle). Backend-agnostic —
+/// used by the black-box HTTP tests.
+///
+/// Migrations run **once per test process** (guarded by [`MIGRATED`]): the schema
+/// is shared, and cargo runs test binaries sequentially, so this avoids dozens of
+/// concurrent `migrate()` calls hammering the database (which exhausts Oracle's
+/// session limit and trips concurrent-DDL contention).
+pub async fn storage() -> kora::storage::DynStorage {
+    let mut cfg = kora::config::KoraConfig::load().expect("config should load from env");
+    // Each test spawns its own server (and pool); keep pools small so the parallel
+    // suite does not exhaust the database's connection limit. Honour a smaller
+    // configured value (the Oracle CI job sets DB_POOL_MAX=2).
+    cfg.db_pool_max = cfg.db_pool_max.min(5);
+    let store = kora::storage::connect(&cfg)
+        .await
+        .expect("storage backend should connect");
+    MIGRATED
+        .get_or_init(|| async {
+            store.migrate().await.expect("migrations should apply");
+        })
+        .await;
+    store
+}
+
+/// Ensures migrations are applied exactly once per test process.
+static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 /// Return a process-wide `PrometheusHandle`, installing the recorder on first call.
 ///
@@ -131,9 +169,9 @@ fn prometheus_handle() -> PrometheusHandle {
 
 /// Spawn the Kora server on a random port and return the base URL.
 pub async fn spawn_server() -> String {
-    let pool = pool().await;
+    let storage = storage().await;
     let config = kora::config::KoraConfig::default();
-    let app = kora::api::router(pool, prometheus_handle(), config.max_body_size);
+    let app = kora::api::router(storage, prometheus_handle(), config.max_body_size);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("should bind to random port");

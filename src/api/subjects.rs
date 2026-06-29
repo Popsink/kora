@@ -6,12 +6,11 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use sqlx::PgPool;
 
 use crate::api::mode::enforce_writable;
 use crate::error::KoraError;
 use crate::schema::{self, SchemaFormat};
-use crate::storage::{compatibility, references, schemas, subjects};
+use crate::storage::{DynStorage, schemas, subjects};
 use crate::types::SchemaReference;
 
 // -- Types --
@@ -153,7 +152,7 @@ pub struct ReferencedByParams {
 /// Returns `KoraError::InvalidSchema` (422) for unparseable schemas or
 /// `KoraError::BackendDataStore` (500) for database failures.
 pub async fn register_schema(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(subject): Path<String>,
     Query(params): Query<RegisterParams>,
     body: Result<Json<SchemaRequest>, JsonRejection>,
@@ -163,17 +162,16 @@ pub async fn register_schema(
     validate_subject(&subject)?;
 
     // Enforce registry mode before expensive parsing/compat checks.
-    enforce_writable(&pool, &subject).await?;
+    enforce_writable(&storage, &subject).await?;
 
     let format = SchemaFormat::from_optional(body.schema_type.as_deref())?;
     let parsed = schema::parse(format, &body.schema)?;
 
     // Resolve effective normalize: explicit param OR subject/global config.
-    let normalize =
-        params.normalize || compatibility::get_effective_normalize(&pool, &subject).await?;
+    let normalize = params.normalize || storage.get_effective_normalize(&subject).await?;
 
     // Build compatibility check to run inside the transaction (eliminates TOCTOU).
-    let level = compatibility::get_effective_compatibility(&pool, &subject).await?;
+    let level = storage.get_effective_compatibility(&subject).await?;
     let direction = schema::CompatDirection::from_level(&level);
     let compat = if direction == schema::CompatDirection::None {
         None
@@ -184,7 +182,8 @@ pub async fn register_schema(
             Vec::new()
         } else {
             // Non-transitive: pre-fetch latest (will be re-validated inside tx lock).
-            schemas::find_latest_schema_by_subject(&pool, &subject, false)
+            storage
+                .find_latest_schema_by_subject(&subject, false)
                 .await?
                 .into_iter()
                 .collect()
@@ -200,24 +199,24 @@ pub async fn register_schema(
     // Validate references before any writes.
     let refs = body.references.as_deref().unwrap_or_default();
     if !refs.is_empty() {
-        references::validate_references(&pool, refs).await?;
+        storage.validate_references(refs).await?;
     }
 
-    let (id, version, _is_new) = schemas::register_schema_atomically(
-        &pool,
-        &subject,
-        &schemas::NewSchema {
-            schema_type: format.as_str(),
-            schema_text: &body.schema,
-            canonical_form: &parsed.canonical_form,
-            fingerprint: &parsed.fingerprint,
-            raw_fingerprint: &parsed.raw_fingerprint,
-        },
-        refs,
-        normalize,
-        compat,
-    )
-    .await?;
+    let (id, version, _is_new) = storage
+        .register_schema_atomically(
+            &subject,
+            &schemas::NewSchema {
+                schema_type: format.as_str(),
+                schema_text: &body.schema,
+                canonical_form: &parsed.canonical_form,
+                fingerprint: &parsed.fingerprint,
+                raw_fingerprint: &parsed.raw_fingerprint,
+            },
+            refs,
+            normalize,
+            compat,
+        )
+        .await?;
 
     // Confluent RegisterSchemaResponse: id, version, schemaType, schema always present.
     // References included when non-empty (NON_EMPTY).
@@ -242,7 +241,7 @@ pub async fn register_schema(
 /// Returns `KoraError::SubjectNotFound` (40401) if the subject doesn't exist,
 /// or `KoraError::SchemaNotFound` (40403) if the schema is not registered.
 pub async fn check_schema(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(subject): Path<String>,
     Query(params): Query<CheckParams>,
     body: Result<Json<SchemaRequest>, JsonRejection>,
@@ -255,8 +254,7 @@ pub async fn check_schema(
     let parsed = schema::parse(format, &body.schema)?;
 
     // Resolve effective normalize: explicit param OR subject/global config.
-    let normalize =
-        params.normalize || compatibility::get_effective_normalize(&pool, &subject).await?;
+    let normalize = params.normalize || storage.get_effective_normalize(&subject).await?;
 
     let fp = if normalize {
         &parsed.fingerprint
@@ -264,21 +262,17 @@ pub async fn check_schema(
         &parsed.raw_fingerprint
     };
 
-    let subject_id = subjects::find_subject_id_by_name(&pool, &subject, params.deleted)
+    let subject_id = storage
+        .find_subject_id_by_name(&subject, params.deleted)
         .await?
         .ok_or(KoraError::SubjectNotFound)?;
 
-    let sv = schemas::find_schema_by_subject_id_and_fingerprint(
-        &pool,
-        subject_id,
-        fp,
-        normalize,
-        params.deleted,
-    )
-    .await?
-    .ok_or(KoraError::SchemaNotFound)?;
+    let sv = storage
+        .find_schema_by_subject_id_and_fingerprint(subject_id, fp, normalize, params.deleted)
+        .await?
+        .ok_or(KoraError::SchemaNotFound)?;
 
-    Ok(Json(load_references(&pool, sv).await?))
+    Ok(Json(load_references(&storage, sv).await?))
 }
 
 /// List registered subjects.
@@ -290,7 +284,7 @@ pub async fn check_schema(
 ///
 /// Returns `KoraError::BackendDataStore` (500) for database failures.
 pub async fn list_subjects(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Query(params): Query<ListSubjectsParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     let prefix = if params.subject_prefix == ":*:" || params.subject_prefix.is_empty() {
@@ -298,15 +292,15 @@ pub async fn list_subjects(
     } else {
         Some(params.subject_prefix.as_str())
     };
-    let names = subjects::list_subjects(
-        &pool,
-        params.deleted,
-        params.deleted_only,
-        prefix,
-        params.offset.max(0),
-        params.limit,
-    )
-    .await?;
+    let names = storage
+        .list_subjects(
+            params.deleted,
+            params.deleted_only,
+            prefix,
+            params.offset.max(0),
+            params.limit,
+        )
+        .await?;
     Ok(Json(names))
 }
 
@@ -319,26 +313,29 @@ pub async fn list_subjects(
 /// Returns `KoraError::SubjectNotFound` (40401) if the subject doesn't exist,
 /// or `KoraError::BackendDataStore` (500) for database failures.
 pub async fn list_versions(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(subject): Path<String>,
     Query(params): Query<ListVersionsParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_subject(&subject)?;
 
-    if !subjects::subject_exists(&pool, &subject, params.deleted || params.deleted_only).await? {
+    if !storage
+        .subject_exists(&subject, params.deleted || params.deleted_only)
+        .await?
+    {
         return Err(KoraError::SubjectNotFound);
     }
 
-    let versions = schemas::list_schema_versions(
-        &pool,
-        &subject,
-        params.deleted,
-        params.deleted_only,
-        params.deleted_as_negative,
-        params.offset.max(0),
-        params.limit,
-    )
-    .await?;
+    let versions = storage
+        .list_schema_versions(
+            &subject,
+            params.deleted,
+            params.deleted_only,
+            params.deleted_as_negative,
+            params.offset.max(0),
+            params.limit,
+        )
+        .await?;
     Ok(Json(versions))
 }
 
@@ -353,22 +350,26 @@ pub async fn list_versions(
 /// Returns `KoraError::SubjectNotFound` (40401) if the subject doesn't exist,
 /// or `KoraError::VersionNotFound` (40402) if the version doesn't exist.
 pub async fn get_schema_by_version(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path((subject, version)): Path<(String, String)>,
     Query(params): Query<GetVersionParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_subject(&subject)?;
 
     let row = if version == "latest" {
-        schemas::find_latest_schema_by_subject(&pool, &subject, params.deleted).await?
+        storage
+            .find_latest_schema_by_subject(&subject, params.deleted)
+            .await?
     } else {
         let v = parse_version(&version)?;
-        schemas::find_schema_by_subject_version(&pool, &subject, v, params.deleted).await?
+        storage
+            .find_schema_by_subject_version(&subject, v, params.deleted)
+            .await?
     };
 
     if let Some(sv) = row {
-        Ok(Json(load_references(&pool, sv).await?))
-    } else if subjects::subject_exists(&pool, &subject, params.deleted).await? {
+        Ok(Json(load_references(&storage, sv).await?))
+    } else if storage.subject_exists(&subject, params.deleted).await? {
         Err(KoraError::VersionNotFound)
     } else {
         Err(KoraError::SubjectNotFound)
@@ -384,17 +385,17 @@ pub async fn get_schema_by_version(
 /// Returns `KoraError::SubjectNotFound` (40401) if the subject doesn't exist
 /// (or isn't soft-deleted when `permanent=true`).
 pub async fn delete_subject(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(subject): Path<String>,
     Query(params): Query<PermanentParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_subject(&subject)?;
-    enforce_writable(&pool, &subject).await?;
+    enforce_writable(&storage, &subject).await?;
 
     if params.permanent {
         // All checks (soft-deleted?, references?) run inside the transaction
         // to eliminate TOCTOU races with concurrent writers.
-        match subjects::hard_delete_subject(&pool, &subject).await? {
+        match storage.hard_delete_subject(&subject).await? {
             subjects::HardDeleteResult::Deleted(versions) => Ok(Json(versions)),
             subjects::HardDeleteResult::NotSoftDeleted => {
                 Err(KoraError::SubjectNotSoftDeleted(subject))
@@ -405,10 +406,10 @@ pub async fn delete_subject(
             }
         }
     } else {
-        if !subjects::subject_exists(&pool, &subject, false).await? {
-            return Err(subject_not_found_or_soft_deleted(&pool, &subject).await);
+        if !storage.subject_exists(&subject, false).await? {
+            return Err(subject_not_found_or_soft_deleted(&storage, &subject).await);
         }
-        let versions = subjects::soft_delete_subject(&pool, &subject).await?;
+        let versions = storage.soft_delete_subject(&subject).await?;
         Ok(Json(versions))
     }
 }
@@ -422,40 +423,40 @@ pub async fn delete_subject(
 ///
 /// Returns `KoraError::SubjectNotFound` (40401) or `KoraError::VersionNotFound` (40402).
 pub async fn delete_version(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path((subject, version)): Path<(String, String)>,
     Query(params): Query<PermanentParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_subject(&subject)?;
-    enforce_writable(&pool, &subject).await?;
+    enforce_writable(&storage, &subject).await?;
 
     let deleted = if params.permanent {
         let v = parse_version(&version)?;
         // Subject must exist (even soft-deleted) for hard-delete to make sense.
-        if !subjects::subject_exists(&pool, &subject, true).await? {
+        if !storage.subject_exists(&subject, true).await? {
             return Err(KoraError::SubjectNotFound);
         }
         // Confluent requires version to be soft-deleted first (40407).
-        if schemas::version_is_active(&pool, &subject, v).await? {
+        if storage.version_is_active(&subject, v).await? {
             return Err(KoraError::SchemaVersionNotSoftDeleted(subject, v));
         }
-        if references::is_version_referenced(&pool, &subject, v).await? {
+        if storage.is_version_referenced(&subject, v).await? {
             return Err(KoraError::ReferenceExists(format!("{subject} version {v}")));
         }
-        schemas::hard_delete_schema_version(&pool, &subject, v).await?
+        storage.hard_delete_schema_version(&subject, v).await?
     } else {
-        if !subjects::subject_exists(&pool, &subject, false).await? {
+        if !storage.subject_exists(&subject, false).await? {
             return Err(KoraError::SubjectNotFound);
         }
         if version == "latest" {
-            schemas::soft_delete_latest_schema(&pool, &subject).await?
+            storage.soft_delete_latest_schema(&subject).await?
         } else {
             let v = parse_version(&version)?;
             // Return 40406 if version is already soft-deleted.
-            if schemas::version_is_soft_deleted(&pool, &subject, v).await? {
+            if storage.version_is_soft_deleted(&subject, v).await? {
                 return Err(KoraError::SchemaVersionSoftDeleted(subject, v));
             }
-            schemas::soft_delete_schema_version(&pool, &subject, v).await?
+            storage.soft_delete_schema_version(&subject, v).await?
         }
     }
     .ok_or(KoraError::VersionNotFound)?;
@@ -474,22 +475,26 @@ pub async fn delete_version(
 /// Returns `KoraError::SubjectNotFound` (40401) if the subject doesn't exist,
 /// or `KoraError::VersionNotFound` (40402) if the version doesn't exist.
 pub async fn get_schema_text_by_version(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path((subject, version)): Path<(String, String)>,
     Query(params): Query<GetVersionParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_subject(&subject)?;
 
     let row = if version == "latest" {
-        schemas::find_latest_schema_by_subject(&pool, &subject, params.deleted).await?
+        storage
+            .find_latest_schema_by_subject(&subject, params.deleted)
+            .await?
     } else {
         let v = parse_version(&version)?;
-        schemas::find_schema_by_subject_version(&pool, &subject, v, params.deleted).await?
+        storage
+            .find_schema_by_subject_version(&subject, v, params.deleted)
+            .await?
     };
 
     if let Some(sv) = row {
         Ok(Json(sv.schema))
-    } else if subjects::subject_exists(&pool, &subject, params.deleted).await? {
+    } else if storage.subject_exists(&subject, params.deleted).await? {
         Err(KoraError::VersionNotFound)
     } else {
         Err(KoraError::SubjectNotFound)
@@ -509,29 +514,30 @@ pub async fn get_schema_text_by_version(
 /// `KoraError::VersionNotFound` (40402) if the version doesn't exist,
 /// or `KoraError::InvalidVersion` (42202) for invalid version strings.
 pub async fn get_referencing_ids_by_version(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path((subject, version)): Path<(String, String)>,
     Query(params): Query<ReferencedByParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     validate_subject(&subject)?;
     let v = parse_version(&version)?;
 
-    let ids = references::find_referencing_schema_ids(
-        &pool,
-        &subject,
-        v,
-        params.deleted,
-        params.offset.max(0),
-        params.limit,
-    )
-    .await?;
+    let ids = storage
+        .find_referencing_schema_ids(
+            &subject,
+            v,
+            params.deleted,
+            params.offset.max(0),
+            params.limit,
+        )
+        .await?;
 
     // Lazy existence check: only when result is empty (avoids extra queries on happy path).
     if ids.is_empty() {
-        if !subjects::subject_exists(&pool, &subject, false).await? {
+        if !storage.subject_exists(&subject, false).await? {
             return Err(KoraError::SubjectNotFound);
         }
-        if schemas::find_schema_by_subject_version(&pool, &subject, v, false)
+        if storage
+            .find_schema_by_subject_version(&subject, v, false)
             .await?
             .is_none()
         {
@@ -546,16 +552,17 @@ pub async fn get_referencing_ids_by_version(
 
 /// Populate schema references on a `SchemaVersion` before returning to the client.
 async fn load_references(
-    pool: &PgPool,
+    storage: &DynStorage,
     mut sv: schemas::SchemaVersion,
 ) -> Result<schemas::SchemaVersion, KoraError> {
-    sv.references = references::find_references_by_schema_id(pool, sv.id).await?;
+    sv.references = storage.find_references_by_schema_id(sv.id).await?;
     Ok(sv)
 }
 
 /// Return `SubjectNotFound` or `SubjectSoftDeleted` based on subject state.
-async fn subject_not_found_or_soft_deleted(pool: &PgPool, subject: &str) -> KoraError {
-    if subjects::subject_is_soft_deleted(pool, subject)
+async fn subject_not_found_or_soft_deleted(storage: &DynStorage, subject: &str) -> KoraError {
+    if storage
+        .subject_is_soft_deleted(subject)
         .await
         .unwrap_or(false)
     {

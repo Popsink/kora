@@ -7,7 +7,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use sqlx::PgPool;
+
+use crate::storage::DynStorage;
 
 // -- Types --
 
@@ -19,12 +20,9 @@ struct HealthResponse {
 
 // -- Handlers --
 
-/// `GET /health` — returns 200 when PG is reachable, 503 otherwise.
-pub async fn check_health(State(pool): State<PgPool>) -> Response {
-    let ok = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&pool)
-        .await
-        .is_ok();
+/// `GET /health` — returns 200 when the database is reachable, 503 otherwise.
+pub async fn check_health(State(storage): State<DynStorage>) -> Response {
+    let ok = storage.ping().await.is_ok();
 
     let (status_code, body) = if ok {
         (StatusCode::OK, HealthResponse { status: "UP" })

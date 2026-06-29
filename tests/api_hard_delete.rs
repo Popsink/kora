@@ -7,6 +7,9 @@ use reqwest::StatusCode;
 
 #[tokio::test]
 async fn hard_delete_subject_after_soft_delete_succeeds() {
+    if common::backend_is_oracle() {
+        return; // closing assertion queries PostgreSQL internals directly
+    }
     let base = common::spawn_server().await;
     let pool = common::pool().await;
     let client = reqwest::Client::new();

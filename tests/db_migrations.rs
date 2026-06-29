@@ -4,6 +4,9 @@ mod common;
 
 #[tokio::test]
 async fn migrations_create_all_tables() {
+    if common::backend_is_oracle() {
+        return; // PostgreSQL-internal schema assertions (information_schema)
+    }
     let pool = common::pool().await;
 
     let tables: Vec<String> = sqlx::query_scalar(
@@ -34,6 +37,9 @@ async fn migrations_create_all_tables() {
 
 #[tokio::test]
 async fn migrations_insert_global_config() {
+    if common::backend_is_oracle() {
+        return; // PostgreSQL-internal schema assertions (information_schema)
+    }
     let pool = common::pool().await;
 
     let (level, mode): (String, String) =

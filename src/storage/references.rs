@@ -63,6 +63,44 @@ pub async fn find_references_by_schema_id(
         .collect())
 }
 
+/// Find references for many schema content IDs in one query.
+///
+/// Returns `(content_id, reference)` pairs (ordered by content then name) so the
+/// caller can group them — avoids an N+1 when listing many schemas.
+///
+/// # Errors
+///
+/// Returns a database error on connection failure.
+pub async fn find_references_for_schema_ids(
+    pool: &PgPool,
+    content_ids: &[i64],
+) -> Result<Vec<(i64, SchemaReference)>, sqlx::Error> {
+    if content_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT content_id, name, subject, version FROM schema_references \
+         WHERE content_id = ANY($1) ORDER BY content_id, name",
+    )
+    .bind(content_ids)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            (
+                sqlx::Row::get::<i64, _>(row, "content_id"),
+                SchemaReference {
+                    name: sqlx::Row::get(row, "name"),
+                    subject: sqlx::Row::get(row, "subject"),
+                    version: sqlx::Row::get(row, "version"),
+                },
+            )
+        })
+        .collect())
+}
+
 /// Find content IDs of schemas that reference the given subject/version.
 ///
 /// Returns the global schema IDs (content IDs) of schemas containing a

@@ -53,17 +53,19 @@ kora:
   extraEnvVarsCM: ""
   extraEnvVarsSecret: ""
 
-## @section Database parameters (external PostgreSQL)
-## @param database.host PostgreSQL host
-## @param database.port PostgreSQL port
-## @param database.user PostgreSQL user
-## @param database.database PostgreSQL database name
+## @section Database parameters (external PostgreSQL or Oracle)
+## @param database.backend Backing store engine: "postgres" (default) or "oracle". Oracle needs an Oracle-enabled image (built with the `oracle` cargo feature — still a single static binary, no Instant Client).
+## @param database.host Database host
+## @param database.port Database port (PostgreSQL 5432, Oracle 1521)
+## @param database.user Database user
+## @param database.database Database name (PostgreSQL) or service name (Oracle, e.g. FREEPDB1)
 ## @param database.password Direct value for database password (used if database.existingSecret is not set)
-## @param database.url Direct value for the full DATABASE_URL (used if database.existingSecret is not set); takes priority over components
-## @param database.existingSecret Name of existing secret containing the database password or DATABASE_URL
+## @param database.url Direct value for the full connection URL (used if database.existingSecret is not set); takes priority over components. Oracle: oracle://user:pass@host:port/service
+## @param database.existingSecret Name of existing secret containing the database password or connection URL
 ## @param database.secretKeys.password Key name in the secret for the database password
-## @param database.secretKeys.url Key name in the secret for the full DATABASE_URL; when set, takes priority over secretKeys.password
+## @param database.secretKeys.url Key name in the secret for the full connection URL; when set, takes priority over secretKeys.password
 database:
+  backend: "postgres"
   host: ""
   port: 5432
   user: "kora"

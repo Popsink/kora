@@ -59,11 +59,71 @@ jobs:
       - name: Run CI checks
         run: just ci
 
+      # Lint the Oracle backend too. oracle-rs is pure Rust, so this is a plain
+      # compile — no Oracle client/install needed; the runtime path is exercised
+      # by the `oracle` job below.
+      - name: Clippy (oracle feature)
+        run: cargo clippy --features oracle -- -D warnings -D clippy::all -D clippy::pedantic
+
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-logs
+          path: target/tmp/
+          retention-days: 14
+
+  oracle:
+    name: Oracle backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      oracle:
+        image: gvenzl/oracle-free:slim
+        env:
+          ORACLE_PASSWORD: oracle
+          APP_USER: kora
+          APP_USER_PASSWORD: kora
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 40
+          --health-start-period 90s
+
+    env:
+      # The same Confluent-compatible integration suite, run against Oracle. No
+      # Oracle Instant Client is installed — the pure-Rust driver needs none.
+      DATABASE_URL: ""
+      DB_BACKEND: oracle
+      DB_HOST: localhost
+      DB_PORT: "1521"
+      DB_USER: kora
+      DB_PASSWORD: kora
+      DB_NAME: FREEPDB1
+      # Keep per-test pools small so the parallel suite does not exhaust Oracle
+      # Free's session limit.
+      DB_POOL_MAX: "2"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run integration suite against Oracle
+        run: cargo test --features oracle --test '*' -- --include-ignored --test-threads=4
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: oracle-test-logs
           path: target/tmp/
           retention-days: 14
 

@@ -6,11 +6,13 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use sqlx::PgPool;
+
+use std::collections::HashMap;
 
 use crate::error::KoraError;
 use crate::schema::SchemaFormat;
-use crate::storage::{references, schemas};
+use crate::storage::DynStorage;
+use crate::types::SchemaReference;
 
 /// Query parameters for cross-reference endpoints.
 #[derive(Debug, Deserialize)]
@@ -90,15 +92,16 @@ use super::subjects::{default_limit, default_subject_prefix};
 /// Returns `KoraError::SchemaNotFound` (404) if no schema exists with the
 /// given ID, or `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_schema_by_id(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(id): Path<i64>,
     Query(params): Query<GetSchemaByIdParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    let (schema_text, schema_type) = schemas::find_schema_by_id(&pool, id)
+    let (schema_text, schema_type) = storage
+        .find_schema_by_id(id)
         .await?
         .ok_or(KoraError::SchemaNotFound)?;
 
-    let refs = references::find_references_by_schema_id(&pool, id).await?;
+    let refs = storage.find_references_by_schema_id(id).await?;
 
     // Confluent SchemaString DTO: schema, schemaType always present, references omitted when empty.
     let mut body = serde_json::json!({
@@ -110,7 +113,7 @@ pub async fn get_schema_by_id(
     }
 
     if params.fetch_max_id {
-        let max_id = schemas::find_max_schema_id(&pool).await?;
+        let max_id = storage.find_max_schema_id().await?;
         body["maxId"] = serde_json::json!(max_id);
     }
 
@@ -126,22 +129,22 @@ pub async fn get_schema_by_id(
 /// Returns `KoraError::SchemaNotFound` (404) if no schema exists with the
 /// given ID, or `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_subjects_by_schema_id(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(id): Path<i64>,
     Query(params): Query<CrossRefParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    if !schemas::schema_exists(&pool, id).await? {
+    if !storage.schema_exists(id).await? {
         return Err(KoraError::SchemaNotFound);
     }
-    let subjects = schemas::find_subjects_by_schema_id(
-        &pool,
-        id,
-        params.deleted,
-        params.subject.as_deref(),
-        params.offset.max(0),
-        params.limit,
-    )
-    .await?;
+    let subjects = storage
+        .find_subjects_by_schema_id(
+            id,
+            params.deleted,
+            params.subject.as_deref(),
+            params.offset.max(0),
+            params.limit,
+        )
+        .await?;
     Ok(Json(subjects))
 }
 
@@ -154,22 +157,22 @@ pub async fn get_subjects_by_schema_id(
 /// Returns `KoraError::SchemaNotFound` (404) if no schema exists with the
 /// given ID, or `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_versions_by_schema_id(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(id): Path<i64>,
     Query(params): Query<CrossRefParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    if !schemas::schema_exists(&pool, id).await? {
+    if !storage.schema_exists(id).await? {
         return Err(KoraError::SchemaNotFound);
     }
-    let versions = schemas::find_versions_by_schema_id(
-        &pool,
-        id,
-        params.deleted,
-        params.subject.as_deref(),
-        params.offset.max(0),
-        params.limit,
-    )
-    .await?;
+    let versions = storage
+        .find_versions_by_schema_id(
+            id,
+            params.deleted,
+            params.subject.as_deref(),
+            params.offset.max(0),
+            params.limit,
+        )
+        .await?;
     Ok(Json(versions))
 }
 
@@ -181,7 +184,7 @@ pub async fn get_versions_by_schema_id(
 ///
 /// Returns `KoraError::BackendDataStore` (500) for database failures.
 pub async fn list_schemas(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Query(params): Query<ListSchemasParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     let prefix = if params.subject_prefix == ":*:" || params.subject_prefix.is_empty() {
@@ -189,18 +192,26 @@ pub async fn list_schemas(
     } else {
         Some(params.subject_prefix.as_str())
     };
-    let mut all = schemas::list_schemas(
-        &pool,
-        params.deleted,
-        params.latest_only,
-        prefix,
-        params.offset.max(0),
-        params.limit,
-    )
-    .await?;
+    let mut all = storage
+        .list_schemas(
+            params.deleted,
+            params.latest_only,
+            prefix,
+            params.offset.max(0),
+            params.limit,
+        )
+        .await?;
 
+    // Load references for every listed schema in one query, then group by content
+    // id — avoids an N+1 (one query per schema). Several rows can share a content
+    // id (identical content under different subjects), so clone per row.
+    let ids: Vec<i64> = all.iter().map(|sv| sv.id).collect();
+    let mut by_id: HashMap<i64, Vec<SchemaReference>> = HashMap::new();
+    for (content_id, reference) in storage.find_references_for_schema_ids(&ids).await? {
+        by_id.entry(content_id).or_default().push(reference);
+    }
     for sv in &mut all {
-        sv.references = references::find_references_by_schema_id(&pool, sv.id).await?;
+        sv.references = by_id.get(&sv.id).cloned().unwrap_or_default();
     }
 
     Ok(Json(all))
@@ -215,11 +226,12 @@ pub async fn list_schemas(
 /// Returns `KoraError::SchemaNotFound` (40403) if no schema exists with the
 /// given ID, or `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_schema_text_by_id(
-    State(pool): State<PgPool>,
+    State(storage): State<DynStorage>,
     Path(id): Path<i64>,
     Query(_params): Query<GetSchemaTextParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    let (schema_text, _schema_type) = schemas::find_schema_by_id(&pool, id)
+    let (schema_text, _schema_type) = storage
+        .find_schema_by_id(id)
         .await?
         .ok_or(KoraError::SchemaNotFound)?;
     Ok(Json(schema_text))
