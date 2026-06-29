@@ -71,6 +71,7 @@ docker run -p 8080:8080 -e DATABASE_URL="postgres://user:pass@host:5432/kora" gh
 | `MAX_BODY_SIZE` | `16777216` | Maximum request body size in bytes |
 | `DB_POOL_MAX` | `20` | Maximum database connections |
 | `RUST_LOG` | `info` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
+| `DEFAULT_COMPATIBILITY` | *(unset)* | Default global compatibility level, re-applied to the global config on **every startup** — overwriting any runtime `PUT`/`DELETE /config` change to the global level. One of `BACKWARD`, `BACKWARD_TRANSITIVE`, `FORWARD`, `FORWARD_TRANSITIVE`, `FULL`, `FULL_TRANSITIVE`, `NONE`. Leave unset (default) to let the runtime API own the level (`BACKWARD` on a fresh install) |
 
 ## API
 

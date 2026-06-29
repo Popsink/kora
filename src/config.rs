@@ -6,6 +6,8 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::api::compatibility::COMPATIBILITY_LEVELS;
+
 // -- Types --
 
 /// Top-level configuration for the Kora server.
@@ -42,6 +44,14 @@ pub struct KoraConfig {
     /// Maximum number of database connections in the pool.
     #[serde(default = "default_db_pool_max")]
     pub db_pool_max: u32,
+    /// Default global schema compatibility level. When set, it is reconciled into
+    /// the global config row (`subject IS NULL`) on every startup — the declared
+    /// default is the source of truth, overwriting any runtime `PUT`/`DELETE
+    /// /config` change to the global level. When unset (or blank), the stored
+    /// level is kept (built-in default `BACKWARD`). Validated on load against
+    /// `COMPATIBILITY_LEVELS`.
+    #[serde(default)]
+    pub default_compatibility: Option<String>,
 }
 
 // -- Impls --
@@ -59,6 +69,7 @@ impl Default for KoraConfig {
             port: default_port(),
             max_body_size: default_max_body_size(),
             db_pool_max: default_db_pool_max(),
+            default_compatibility: None,
         }
     }
 }
@@ -67,15 +78,18 @@ impl KoraConfig {
     /// Load configuration from defaults and environment variables.
     ///
     /// Recognized env vars: `DATABASE_URL`, `DB_HOST`, `DB_PORT`, `DB_USER`,
-    /// `DB_PASSWORD`, `DB_NAME`, `HOST`, `PORT`, `MAX_BODY_SIZE`, `DB_POOL_MAX`.
+    /// `DB_PASSWORD`, `DB_NAME`, `HOST`, `PORT`, `MAX_BODY_SIZE`, `DB_POOL_MAX`,
+    /// `DEFAULT_COMPATIBILITY`.
     ///
     /// When `DATABASE_URL` is empty, it is composed from the `DB_*` components
-    /// (with the user/password percent-encoded).
+    /// (with the user/password percent-encoded). A blank `DEFAULT_COMPATIBILITY`
+    /// is treated as unset.
     ///
     /// # Errors
     ///
-    /// Returns an error if values cannot be parsed, or if neither `DATABASE_URL`
-    /// nor a complete `DB_*` set (`DB_HOST`, `DB_USER`, `DB_NAME`) is provided.
+    /// Returns an error if values cannot be parsed, if `DEFAULT_COMPATIBILITY` is
+    /// not a known compatibility level, or if neither `DATABASE_URL` nor a
+    /// complete `DB_*` set (`DB_HOST`, `DB_USER`, `DB_NAME`) is provided.
     pub fn load() -> Result<Self, Box<figment::Error>> {
         let mut cfg: Self = Figment::from(Serialized::defaults(Self::default()))
             .merge(Env::raw().only(&[
@@ -92,6 +106,24 @@ impl KoraConfig {
             ]))
             .extract()
             .map_err(Box::new)?;
+
+        // Read DEFAULT_COMPATIBILITY directly rather than through figment: figment
+        // coerces bool/numeric-looking strings (e.g. "true", "1") to non-string
+        // types and would fail with an opaque error before our check runs. A blank
+        // or whitespace-only value is treated as unset; otherwise the level is
+        // validated so a typo fails fast at boot with an actionable message.
+        cfg.default_compatibility = std::env::var("DEFAULT_COMPATIBILITY")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        if let Some(level) = &cfg.default_compatibility
+            && !COMPATIBILITY_LEVELS.contains(&level.as_str())
+        {
+            return Err(Box::new(figment::Error::from(format!(
+                "DEFAULT_COMPATIBILITY is invalid: {level}; must be one of: {}",
+                COMPATIBILITY_LEVELS.join(", ")
+            ))));
+        }
 
         if cfg.database_url.is_empty() {
             let mut missing = Vec::new();

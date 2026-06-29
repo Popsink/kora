@@ -302,3 +302,137 @@ async fn get_subject_compatibility_accepts_python_style_default_to_global() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["compatibilityLevel"], "BACKWARD");
 }
+
+// -- Declarative startup default (issue #47) --
+//
+// `storage::apply_startup_config` is what the startup path (main.rs) calls when
+// `DEFAULT_COMPATIBILITY` is set; it delegates to `reconcile_global_level`. These
+// tests mutate the shared global config row, so — like the global `/config` tests
+// above — they are `#[serial]` and restore `BACKWARD`. This binary is the only one
+// that touches the global row, so `#[serial]` is sufficient to serialize them.
+
+/// A configured default is the source of truth: startup reconciliation overwrites
+/// whatever global level was stored (e.g. a prior runtime change).
+#[tokio::test]
+#[serial]
+async fn apply_startup_config_overrides_stored_global_level() {
+    let pool = common::pool().await;
+
+    // A previously-stored level (e.g. set by an operator via PUT /config).
+    kora::storage::compatibility::set_global_level(&pool, "FORWARD", false)
+        .await
+        .unwrap();
+
+    let applied = kora::storage::apply_startup_config(&pool, Some("NONE"))
+        .await
+        .unwrap();
+    assert_eq!(applied.as_deref(), Some("NONE"));
+
+    let stored = kora::storage::compatibility::get_global_level(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, "NONE", "the declared default must win on startup");
+
+    // Restore the suite default.
+    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
+        .await
+        .unwrap();
+}
+
+/// With no configured default, startup is a no-op and leaves the stored level alone.
+#[tokio::test]
+#[serial]
+async fn apply_startup_config_without_default_is_noop() {
+    let pool = common::pool().await;
+
+    kora::storage::compatibility::set_global_level(&pool, "FULL", false)
+        .await
+        .unwrap();
+
+    let applied = kora::storage::apply_startup_config(&pool, None)
+        .await
+        .unwrap();
+    assert_eq!(applied, None);
+
+    let stored = kora::storage::compatibility::get_global_level(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored, "FULL",
+        "no declared default must leave the stored level untouched"
+    );
+
+    // Restore the suite default.
+    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
+        .await
+        .unwrap();
+}
+
+/// Startup reconciliation never clobbers per-subject overrides
+/// (the issue's explicit requirement).
+#[tokio::test]
+#[serial]
+async fn apply_startup_config_preserves_subject_overrides() {
+    let pool = common::pool().await;
+    let subject = format!("startup-compat-{}", uuid::Uuid::new_v4());
+
+    kora::storage::compatibility::set_subject_level(&pool, &subject, "FORWARD", false)
+        .await
+        .unwrap();
+
+    kora::storage::apply_startup_config(&pool, Some("FULL"))
+        .await
+        .unwrap();
+
+    let subject_level = kora::storage::compatibility::get_subject_level(&pool, &subject)
+        .await
+        .unwrap();
+    assert_eq!(
+        subject_level.as_deref(),
+        Some("FORWARD"),
+        "per-subject override must survive startup reconciliation"
+    );
+
+    let global = kora::storage::compatibility::get_global_level(&pool)
+        .await
+        .unwrap();
+    assert_eq!(global, "FULL");
+
+    // Restore the suite default.
+    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
+        .await
+        .unwrap();
+}
+
+/// Reconcile changes only the compatibility level — it leaves the global
+/// `normalize` flag intact (`DEFAULT_COMPATIBILITY` governs the level only).
+#[tokio::test]
+#[serial]
+async fn reconcile_global_level_preserves_normalize_flag() {
+    let pool = common::pool().await;
+
+    // Configure the global row with normalize = true via the regular API path.
+    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", true)
+        .await
+        .unwrap();
+
+    kora::storage::compatibility::reconcile_global_level(&pool, "FULL")
+        .await
+        .unwrap();
+
+    let normalize =
+        sqlx::query_scalar::<_, Option<bool>>("SELECT normalize FROM config WHERE subject IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        normalize,
+        Some(true),
+        "reconcile must not reset the normalize flag"
+    );
+
+    // Restore the suite default.
+    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
+        .await
+        .unwrap();
+}

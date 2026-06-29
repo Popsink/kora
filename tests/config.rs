@@ -14,6 +14,7 @@ fn config_defaults_applied() {
     assert_eq!(cfg.port, 8080);
     assert!(cfg.database_url.is_empty());
     assert_eq!(cfg.db_pool_max, 20);
+    assert_eq!(cfg.default_compatibility, None);
 }
 
 #[test]
@@ -72,6 +73,90 @@ fn load_errors_when_neither_url_nor_components_provided() {
 
         assert!(msg.contains("DATABASE_URL"), "{msg}");
         assert!(msg.contains("DB_HOST"), "{msg}");
+        Ok(())
+    });
+}
+
+#[test]
+fn load_accepts_valid_default_compatibility() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("DEFAULT_COMPATIBILITY", "FULL");
+
+        let cfg = KoraConfig::load().expect("valid level should load");
+
+        assert_eq!(cfg.default_compatibility.as_deref(), Some("FULL"));
+        Ok(())
+    });
+}
+
+#[test]
+fn load_rejects_invalid_default_compatibility() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("DEFAULT_COMPATIBILITY", "SIDEWAYS");
+
+        let err = KoraConfig::load().expect_err("invalid level should fail load");
+        let msg = err.to_string();
+
+        assert!(msg.contains("DEFAULT_COMPATIBILITY"), "{msg}");
+        assert!(msg.contains("SIDEWAYS"), "{msg}");
+        Ok(())
+    });
+}
+
+#[test]
+fn load_treats_empty_default_compatibility_as_unset() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("DEFAULT_COMPATIBILITY", "");
+
+        let cfg = KoraConfig::load().expect("empty level should be treated as unset");
+
+        assert_eq!(cfg.default_compatibility, None);
+        Ok(())
+    });
+}
+
+#[test]
+fn load_treats_whitespace_default_compatibility_as_unset() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("DEFAULT_COMPATIBILITY", "   ");
+
+        let cfg = KoraConfig::load().expect("whitespace-only should be treated as unset");
+
+        assert_eq!(cfg.default_compatibility, None);
+        Ok(())
+    });
+}
+
+#[test]
+fn load_trims_default_compatibility() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("DEFAULT_COMPATIBILITY", "  FULL  ");
+
+        let cfg = KoraConfig::load().expect("padded valid level should load");
+
+        assert_eq!(cfg.default_compatibility.as_deref(), Some("FULL"));
+        Ok(())
+    });
+}
+
+#[test]
+fn load_rejects_bool_like_default_compatibility_with_friendly_error() {
+    // A YAML-unquoted scalar like `true`/`123` must still reach the actionable
+    // "must be one of" validation rather than an opaque type-coercion error.
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("DEFAULT_COMPATIBILITY", "true");
+
+        let err = KoraConfig::load().expect_err("bool-like value should fail load");
+        let msg = err.to_string();
+
+        assert!(msg.contains("DEFAULT_COMPATIBILITY"), "{msg}");
+        assert!(msg.contains("must be one of"), "{msg}");
         Ok(())
     });
 }

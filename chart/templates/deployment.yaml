@@ -94,6 +94,10 @@ spec:
               value: {{ .Values.kora.maxBodySize | int | quote }}
             - name: RUST_LOG
               value: {{ .Values.kora.logLevel | quote }}
+            {{- if .Values.kora.defaultCompatibility }}
+            - name: DEFAULT_COMPATIBILITY
+              value: {{ .Values.kora.defaultCompatibility | quote }}
+            {{- end }}
             {{- if .Values.kora.extraEnvVars }}
             {{- include "common.tplvalues.render" (dict "value" .Values.kora.extraEnvVars "context" $) | nindent 12 }}
             {{- end }}
