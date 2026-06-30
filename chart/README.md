@@ -6,7 +6,7 @@
 
 - Kubernetes 1.24+
 - Helm 3.8+
-- An existing PostgreSQL database
+- An existing PostgreSQL or Oracle database
 
 ## Quick Start
 
