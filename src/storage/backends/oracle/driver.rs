@@ -37,7 +37,7 @@ use crate::storage::types::SchemaVersion;
 
 /// Embedded Oracle migration (idempotent PL/SQL block).
 pub(super) const MIGRATION_001: &str =
-    include_str!("../../../../migrations_oracle/001_initial_schema.sql");
+    include_str!("../../../../migrations/oracle/001_initial_schema.sql");
 
 /// Columns and joins selected for every [`SchemaVersion`] lookup, in the fixed
 /// order consumed by [`row_to_sv`].

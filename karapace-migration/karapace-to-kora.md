@@ -11,7 +11,7 @@ The process runs in four sequential phases: audit, dry-run, migrate, verify.
 
 ```mermaid
 flowchart LR
-    A[Karapace\ninstance] -->|just migrate-audit| B[Audit snapshot\nmigration/audits/*.json]
+    A[Karapace\ninstance] -->|just migrate-audit| B[Audit snapshot\nkarapace-migration/audits/*.json]
     B -->|just migrate-dry-run| C{Review\noutput}
     C -->|looks good| D[just migrate-run\nKora PostgreSQL]
     D -->|just migrate-verify| E[Kora\nverified]
@@ -76,8 +76,8 @@ KORA_URL=https://kora.example.com
 KORA_USER=your-kora-user               # omit if no auth
 KORA_PASSWORD=your-kora-pass           # omit if no auth
 
-# Audit file (optional — defaults to the latest file in migration/audits/)
-# AUDIT_FILE=migration/audits/karapace.example.com-2024-01-15T120000Z.json
+# Audit file (optional — defaults to the latest file in karapace-migration/audits/)
+# AUDIT_FILE=karapace-migration/audits/karapace.example.com-2024-01-15T120000Z.json
 ```
 
 > **Note:** If your Karapace or Kora instance does not require authentication, omit the `*_USER` and `*_PASSWORD` variables entirely.
@@ -90,7 +90,7 @@ KORA_PASSWORD=your-kora-pass           # omit if no auth
 just migrate-audit
 ```
 
-This connects to your Karapace instance and fetches every subject, version, schema, and per-subject compatibility configuration — including soft-deleted subjects and versions. It writes the result to a timestamped JSON file under `migration/audits/`.
+This connects to your Karapace instance and fetches every subject, version, schema, and per-subject compatibility configuration — including soft-deleted subjects and versions. It writes the result to a timestamped JSON file under `karapace-migration/audits/`.
 
 Fetching is parallelised across subjects (20 concurrent workers by default), so auditing a large registry typically completes in seconds.
 
@@ -106,7 +106,7 @@ Auditing https://karapace.example.com ...
   ...
   No dedup collisions found.
 
-Audit complete. Written to migration/audits/karapace.example.com-2024-01-15T120000Z.json
+Audit complete. Written to karapace-migration/audits/karapace.example.com-2024-01-15T120000Z.json
 ```
 
 The audit also prints a JSON summary to stdout:
@@ -313,7 +313,7 @@ Do not route production traffic to Kora until `migrate-verify` passes with zero 
 | `KORA_URL` | `migrate-verify` | Base URL of the target Kora instance, e.g. `https://kora.example.com` |
 | `KORA_USER` | `migrate-verify` | BasicAuth username for Kora (optional) |
 | `KORA_PASSWORD` | `migrate-verify` | BasicAuth password for Kora (optional) |
-| `AUDIT_FILE` | `migrate-dry-run`, `migrate-run`, `migrate-verify` | Path to the audit JSON file. Defaults to the most recently modified file in `migration/audits/` |
+| `AUDIT_FILE` | `migrate-dry-run`, `migrate-run`, `migrate-verify` | Path to the audit JSON file. Defaults to the most recently modified file in `karapace-migration/audits/` |
 
 ---
 

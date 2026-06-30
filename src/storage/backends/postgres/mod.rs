@@ -179,7 +179,7 @@ impl Storage for PgStorage {
     // -- Lifecycle --
 
     async fn migrate(&self) -> Result<(), KoraError> {
-        sqlx::migrate!("./migrations")
+        sqlx::migrate!("./migrations/postgres")
             .run(&self.pool)
             .await
             .map_err(|e| KoraError::BackendDataStore(e.to_string()))

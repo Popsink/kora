@@ -11,7 +11,6 @@ WORKDIR /usr/src
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY migrations/ migrations/
-COPY migrations_oracle/ migrations_oracle/
 
 # Optional cargo features. Pass `--build-arg CARGO_FEATURES=oracle` to produce an
 # Oracle-enabled image — still a single static musl binary, since the Oracle

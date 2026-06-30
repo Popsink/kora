@@ -648,6 +648,6 @@ pub async fn pg_connect(database_url: &str, max_connections: u32) -> Result<PgPo
 /// Returns an error if the database is unreachable or migrations fail.
 pub async fn create_pool(database_url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
     let pool = pg_connect(database_url, max_connections).await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    sqlx::migrate!("./migrations/postgres").run(&pool).await?;
     Ok(pool)
 }
