@@ -1,4 +1,4 @@
-# CI — fmt, clippy, test
+# CI — split into focused jobs: lint, helm, postgres backend, oracle backend.
 
 name: CI
 
@@ -15,14 +15,39 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  DATABASE_URL: postgres://kora:kora@localhost:5432/kora
 
 permissions:
   contents: read
 
 jobs:
-  ci:
-    name: Lint & Test
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Clippy (default)
+        run: cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+
+      # oracle-rs is pure Rust, so this is a plain compile — no Oracle client
+      # needed; the runtime path is exercised by the `oracle` job.
+      - name: Clippy (oracle feature)
+        run: cargo clippy --features oracle -- -D warnings -D clippy::all -D clippy::pedantic
+
+  postgres:
+    name: Postgres backend
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -41,35 +66,25 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+    env:
+      DATABASE_URL: postgres://kora:kora@localhost:5432/kora
+
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
-        with:
-          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - name: Run CI checks
-        run: just ci
-
-      # Lint the Oracle backend too. oracle-rs is pure Rust, so this is a plain
-      # compile — no Oracle client/install needed; the runtime path is exercised
-      # by the `oracle` job below.
-      - name: Clippy (oracle feature)
-        run: cargo clippy --features oracle -- -D warnings -D clippy::all -D clippy::pedantic
+      - name: Integration suite against Postgres
+        run: cargo test --test '*' -- --include-ignored
 
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: test-logs
+          name: postgres-test-logs
           path: target/tmp/
           retention-days: 14
 
@@ -116,7 +131,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run integration suite against Oracle
+      - name: Integration suite against Oracle
         run: cargo test --features oracle --test '*' -- --include-ignored --test-threads=4
 
       - name: Upload test logs on failure
@@ -127,8 +142,8 @@ jobs:
           path: target/tmp/
           retention-days: 14
 
-  helm-lint:
-    name: Helm Lint
+  helm:
+    name: Helm
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

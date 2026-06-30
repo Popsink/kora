@@ -9,15 +9,10 @@
 //! All trait methods return [`KoraError`] so handlers stay backend-agnostic; a
 //! driver error becomes [`KoraError::BackendDataStore`].
 
-pub mod compatibility;
-pub mod mode;
-pub mod postgres;
-pub mod references;
-pub mod schemas;
-pub mod subjects;
-
-#[cfg(feature = "oracle")]
-pub mod oracle;
+pub mod backends;
+pub mod compat;
+pub mod sql;
+pub mod types;
 
 use std::sync::Arc;
 
@@ -28,10 +23,9 @@ use sqlx::postgres::PgPoolOptions;
 use crate::config::{DbBackend, KoraConfig};
 use crate::error::KoraError;
 use crate::types::SchemaReference;
-use schemas::{CompatCheck, NewSchema, SchemaVersion, SubjectVersion};
-use subjects::HardDeleteResult;
+use types::{CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion};
 
-pub use postgres::PgStorage;
+pub use backends::PgStorage;
 
 // -- Shared handle --
 
@@ -611,7 +605,7 @@ pub async fn connect(cfg: &KoraConfig) -> Result<DynStorage, StorageInitError> {
 
 #[cfg(feature = "oracle")]
 async fn connect_oracle(cfg: &KoraConfig) -> Result<DynStorage, StorageInitError> {
-    let store = oracle::OracleStorage::connect(
+    let store = backends::OracleStorage::connect(
         &cfg.db_host,
         cfg.db_port,
         &cfg.db_name,

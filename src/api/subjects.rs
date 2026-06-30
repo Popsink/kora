@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::api::mode::enforce_writable;
 use crate::error::KoraError;
 use crate::schema::{self, SchemaFormat};
-use crate::storage::{DynStorage, schemas, subjects};
+use crate::storage::{DynStorage, types};
 use crate::types::SchemaReference;
 
 // -- Types --
@@ -188,7 +188,7 @@ pub async fn register_schema(
                 .into_iter()
                 .collect()
         };
-        Some(schemas::CompatCheck {
+        Some(types::CompatCheck {
             versions,
             new_schema: body.schema.clone(),
             format,
@@ -205,7 +205,7 @@ pub async fn register_schema(
     let (id, version, _is_new) = storage
         .register_schema_atomically(
             &subject,
-            &schemas::NewSchema {
+            &types::NewSchema {
                 schema_type: format.as_str(),
                 schema_text: &body.schema,
                 canonical_form: &parsed.canonical_form,
@@ -396,14 +396,12 @@ pub async fn delete_subject(
         // All checks (soft-deleted?, references?) run inside the transaction
         // to eliminate TOCTOU races with concurrent writers.
         match storage.hard_delete_subject(&subject).await? {
-            subjects::HardDeleteResult::Deleted(versions) => Ok(Json(versions)),
-            subjects::HardDeleteResult::NotSoftDeleted => {
+            types::HardDeleteResult::Deleted(versions) => Ok(Json(versions)),
+            types::HardDeleteResult::NotSoftDeleted => {
                 Err(KoraError::SubjectNotSoftDeleted(subject))
             }
-            subjects::HardDeleteResult::NotFound => Err(KoraError::SubjectNotFound),
-            subjects::HardDeleteResult::ReferenceExists(msg) => {
-                Err(KoraError::ReferenceExists(msg))
-            }
+            types::HardDeleteResult::NotFound => Err(KoraError::SubjectNotFound),
+            types::HardDeleteResult::ReferenceExists(msg) => Err(KoraError::ReferenceExists(msg)),
         }
     } else {
         if !storage.subject_exists(&subject, false).await? {
@@ -553,8 +551,8 @@ pub async fn get_referencing_ids_by_version(
 /// Populate schema references on a `SchemaVersion` before returning to the client.
 async fn load_references(
     storage: &DynStorage,
-    mut sv: schemas::SchemaVersion,
-) -> Result<schemas::SchemaVersion, KoraError> {
+    mut sv: types::SchemaVersion,
+) -> Result<types::SchemaVersion, KoraError> {
     sv.references = storage.find_references_by_schema_id(sv.id).await?;
     Ok(sv)
 }

@@ -1,19 +1,27 @@
 //! `PostgreSQL` storage backend — the default, fully-supported implementation.
 //!
-//! [`PgStorage`] is a thin adapter: it holds a `sqlx` [`PgPool`] and implements
-//! [`Storage`] by delegating to the dialect-specific query functions in the
-//! sibling modules (`subjects`, `schemas`, `compatibility`, `mode`,
-//! `references`). Those functions hold the proven `PostgreSQL` SQL and are left
-//! untouched by the backend abstraction.
+//! [`PgStorage`] holds a `sqlx` [`PgPool`] and implements [`Storage`] through the
+//! shared SQL toolkit (`crate::storage::sql`): it provides a [`SqlExecutor`] over
+//! its pool, then delegates each non-lifecycle `Storage` method to a per-domain
+//! module that owns the dialect `PostgreSQL` SQL. The handful of multi-statement
+//! transactional methods live in those domain modules too, as free functions that
+//! own the proven transaction logic.
+
+pub mod compatibility;
+pub mod mode;
+pub mod references;
+pub mod schemas;
+pub mod subjects;
 
 use async_trait::async_trait;
 use sqlx::PgPool;
 
-use super::schemas::{CompatCheck, NewSchema, SchemaVersion, SubjectVersion};
-use super::subjects::HardDeleteResult;
-use super::{PoolStats, Storage};
-use super::{compatibility, mode, references, schemas, subjects};
 use crate::error::KoraError;
+use crate::storage::sql::{Bind, Row, SqlExecutor};
+use crate::storage::types::{
+    CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion,
+};
+use crate::storage::{PoolStats, Storage};
 use crate::types::SchemaReference;
 
 /// `PostgreSQL`-backed [`Storage`] implementation.
@@ -34,6 +42,136 @@ impl PgStorage {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+// -- SQL toolkit: row wrapper, executor, shared row mapper --
+
+/// Wraps a `sqlx` [`PgRow`](sqlx::postgres::PgRow) so it can be decoded
+/// positionally through the backend-neutral [`Row`] trait.
+pub struct PgRowWrap(sqlx::postgres::PgRow);
+
+impl Row for PgRowWrap {
+    fn get_i64(&self, idx: usize) -> Result<i64, KoraError> {
+        sqlx::Row::try_get::<i64, _>(&self.0, idx)
+            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
+    }
+
+    fn get_i32(&self, idx: usize) -> Result<i32, KoraError> {
+        sqlx::Row::try_get::<i32, _>(&self.0, idx)
+            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
+    }
+
+    fn get_str(&self, idx: usize) -> Result<String, KoraError> {
+        sqlx::Row::try_get::<String, _>(&self.0, idx)
+            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
+    }
+
+    fn get_bool(&self, idx: usize) -> Result<bool, KoraError> {
+        sqlx::Row::try_get::<bool, _>(&self.0, idx)
+            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
+    }
+
+    fn get_opt_i64(&self, idx: usize) -> Result<Option<i64>, KoraError> {
+        sqlx::Row::try_get::<Option<i64>, _>(&self.0, idx)
+            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
+    }
+
+    fn get_opt_str(&self, idx: usize) -> Result<Option<String>, KoraError> {
+        sqlx::Row::try_get::<Option<String>, _>(&self.0, idx)
+            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl SqlExecutor for PgStorage {
+    type Row = PgRowWrap;
+
+    async fn fetch_all(&self, sql: &str, params: &[Bind]) -> Result<Vec<PgRowWrap>, KoraError> {
+        // SAFETY (sqlx 0.9 `SqlSafeStr`): every caller builds `sql` from hardcoded
+        // literals plus interpolated internal/typed values (filter literals, inlined
+        // i64 id lists); all input-derived values are passed as binds, never spliced.
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for b in params {
+            q = match b {
+                Bind::Str(s) => q.bind(s.as_str()),
+                Bind::I64(i) => q.bind(*i),
+                Bind::Bool(v) => q.bind(*v),
+            };
+        }
+        Ok(q.fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(PgRowWrap)
+            .collect())
+    }
+
+    async fn fetch_optional(
+        &self,
+        sql: &str,
+        params: &[Bind],
+    ) -> Result<Option<PgRowWrap>, KoraError> {
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for b in params {
+            q = match b {
+                Bind::Str(s) => q.bind(s.as_str()),
+                Bind::I64(i) => q.bind(*i),
+                Bind::Bool(v) => q.bind(*v),
+            };
+        }
+        Ok(q.fetch_optional(&self.pool).await?.map(PgRowWrap))
+    }
+
+    async fn execute(&self, sql: &str, params: &[Bind]) -> Result<u64, KoraError> {
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for b in params {
+            q = match b {
+                Bind::Str(s) => q.bind(s.as_str()),
+                Bind::I64(i) => q.bind(*i),
+                Bind::Bool(v) => q.bind(*v),
+            };
+        }
+        Ok(q.execute(&self.pool).await?.rows_affected())
+    }
+
+    async fn fetch_all_paged(
+        &self,
+        base_sql: &str,
+        params: &[Bind],
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<PgRowWrap>, KoraError> {
+        let off = offset.max(0);
+        let sql = if limit < 0 {
+            format!("{base_sql} OFFSET {off}")
+        } else {
+            format!("{base_sql} OFFSET {off} LIMIT {limit}")
+        };
+        self.fetch_all(&sql, params).await
+    }
+}
+
+/// Map a row selecting `sc.id, sub.name, sv.version, sc.schema_type, sc.schema_text`
+/// (in that exact order) to a [`SchemaVersion`].
+pub(super) fn row_to_sv(r: &PgRowWrap) -> Result<SchemaVersion, KoraError> {
+    Ok(SchemaVersion {
+        id: r.get_i64(0)?,
+        subject: r.get_str(1)?,
+        version: r.get_i32(2)?,
+        schema_type: r.get_str(3)?,
+        schema: r.get_str(4)?,
+        references: Vec::new(),
+    })
+}
+
+/// Escape LIKE metacharacters and append `%`, mirroring the sibling modules.
+pub(super) fn like_pattern(prefix: Option<&str>) -> Option<String> {
+    prefix.filter(|p| !p.is_empty()).map(|p| {
+        let escaped = p
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        format!("{escaped}%")
+    })
 }
 
 #[async_trait]
@@ -79,23 +217,15 @@ impl Storage for PgStorage {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<String>, KoraError> {
-        Ok(subjects::list_subjects(
-            &self.pool,
-            include_deleted,
-            deleted_only,
-            prefix,
-            offset,
-            limit,
-        )
-        .await?)
+        subjects::list_subjects(self, include_deleted, deleted_only, prefix, offset, limit).await
     }
 
     async fn soft_delete_subject(&self, name: &str) -> Result<Vec<i32>, KoraError> {
-        Ok(subjects::soft_delete_subject(&self.pool, name).await?)
+        subjects::soft_delete_subject(self, name).await
     }
 
     async fn hard_delete_subject(&self, name: &str) -> Result<HardDeleteResult, KoraError> {
-        Ok(subjects::hard_delete_subject(&self.pool, name).await?)
+        subjects::hard_delete_subject(self, name).await
     }
 
     async fn find_subject_id_by_name(
@@ -103,15 +233,15 @@ impl Storage for PgStorage {
         name: &str,
         include_deleted: bool,
     ) -> Result<Option<i64>, KoraError> {
-        Ok(subjects::find_subject_id_by_name(&self.pool, name, include_deleted).await?)
+        subjects::find_subject_id_by_name(self, name, include_deleted).await
     }
 
     async fn subject_exists(&self, name: &str, include_deleted: bool) -> Result<bool, KoraError> {
-        Ok(subjects::subject_exists(&self.pool, name, include_deleted).await?)
+        subjects::subject_exists(self, name, include_deleted).await
     }
 
     async fn subject_is_soft_deleted(&self, name: &str) -> Result<bool, KoraError> {
-        Ok(subjects::subject_is_soft_deleted(&self.pool, name).await?)
+        subjects::subject_is_soft_deleted(self, name).await
     }
 
     // -- Schemas --
@@ -124,22 +254,15 @@ impl Storage for PgStorage {
         normalize: bool,
         compat: Option<CompatCheck>,
     ) -> Result<(i64, i32, bool), KoraError> {
-        schemas::register_schema_atomically(
-            &self.pool,
-            subject_name,
-            schema,
-            refs,
-            normalize,
-            compat,
-        )
-        .await
+        schemas::register_schema_atomically(self, subject_name, schema, refs, normalize, compat)
+            .await
     }
 
     async fn find_all_active_versions(
         &self,
         subject: &str,
     ) -> Result<Vec<SchemaVersion>, KoraError> {
-        Ok(schemas::find_all_active_versions(&self.pool, subject).await?)
+        schemas::find_all_active_versions(self, subject).await
     }
 
     async fn find_schema_by_subject_version(
@@ -148,10 +271,7 @@ impl Storage for PgStorage {
         version: i32,
         include_deleted: bool,
     ) -> Result<Option<SchemaVersion>, KoraError> {
-        Ok(
-            schemas::find_schema_by_subject_version(&self.pool, subject, version, include_deleted)
-                .await?,
-        )
+        schemas::find_schema_by_subject_version(self, subject, version, include_deleted).await
     }
 
     async fn find_latest_schema_by_subject(
@@ -159,7 +279,7 @@ impl Storage for PgStorage {
         subject: &str,
         include_deleted: bool,
     ) -> Result<Option<SchemaVersion>, KoraError> {
-        Ok(schemas::find_latest_schema_by_subject(&self.pool, subject, include_deleted).await?)
+        schemas::find_latest_schema_by_subject(self, subject, include_deleted).await
     }
 
     async fn find_schema_by_subject_id_and_fingerprint(
@@ -169,26 +289,26 @@ impl Storage for PgStorage {
         normalize: bool,
         include_deleted: bool,
     ) -> Result<Option<SchemaVersion>, KoraError> {
-        Ok(schemas::find_schema_by_subject_id_and_fingerprint(
-            &self.pool,
+        schemas::find_schema_by_subject_id_and_fingerprint(
+            self,
             subject_id,
             fingerprint,
             normalize,
             include_deleted,
         )
-        .await?)
+        .await
     }
 
     async fn find_schema_by_id(&self, id: i64) -> Result<Option<(String, String)>, KoraError> {
-        Ok(schemas::find_schema_by_id(&self.pool, id).await?)
+        schemas::find_schema_by_id(self, id).await
     }
 
     async fn find_max_schema_id(&self) -> Result<i64, KoraError> {
-        Ok(schemas::find_max_schema_id(&self.pool).await?)
+        schemas::find_max_schema_id(self).await
     }
 
     async fn schema_exists(&self, id: i64) -> Result<bool, KoraError> {
-        Ok(schemas::schema_exists(&self.pool, id).await?)
+        schemas::schema_exists(self, id).await
     }
 
     async fn find_subjects_by_schema_id(
@@ -199,15 +319,15 @@ impl Storage for PgStorage {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<String>, KoraError> {
-        Ok(schemas::find_subjects_by_schema_id(
-            &self.pool,
+        schemas::find_subjects_by_schema_id(
+            self,
             id,
             include_deleted,
             subject_filter,
             offset,
             limit,
         )
-        .await?)
+        .await
     }
 
     async fn find_versions_by_schema_id(
@@ -218,15 +338,15 @@ impl Storage for PgStorage {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<SubjectVersion>, KoraError> {
-        Ok(schemas::find_versions_by_schema_id(
-            &self.pool,
+        schemas::find_versions_by_schema_id(
+            self,
             id,
             include_deleted,
             subject_filter,
             offset,
             limit,
         )
-        .await?)
+        .await
     }
 
     async fn list_schema_versions(
@@ -238,8 +358,8 @@ impl Storage for PgStorage {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<i32>, KoraError> {
-        Ok(schemas::list_schema_versions(
-            &self.pool,
+        schemas::list_schema_versions(
+            self,
             subject,
             include_deleted,
             deleted_only,
@@ -247,7 +367,7 @@ impl Storage for PgStorage {
             offset,
             limit,
         )
-        .await?)
+        .await
     }
 
     async fn list_schemas(
@@ -258,19 +378,11 @@ impl Storage for PgStorage {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<SchemaVersion>, KoraError> {
-        Ok(schemas::list_schemas(
-            &self.pool,
-            include_deleted,
-            latest_only,
-            prefix,
-            offset,
-            limit,
-        )
-        .await?)
+        schemas::list_schemas(self, include_deleted, latest_only, prefix, offset, limit).await
     }
 
     async fn soft_delete_latest_schema(&self, subject: &str) -> Result<Option<i32>, KoraError> {
-        Ok(schemas::soft_delete_latest_schema(&self.pool, subject).await?)
+        schemas::soft_delete_latest_schema(self, subject).await
     }
 
     async fn soft_delete_schema_version(
@@ -278,7 +390,7 @@ impl Storage for PgStorage {
         subject: &str,
         version: i32,
     ) -> Result<Option<i32>, KoraError> {
-        Ok(schemas::soft_delete_schema_version(&self.pool, subject, version).await?)
+        schemas::soft_delete_schema_version(self, subject, version).await
     }
 
     async fn hard_delete_schema_version(
@@ -286,7 +398,7 @@ impl Storage for PgStorage {
         subject: &str,
         version: i32,
     ) -> Result<Option<i32>, KoraError> {
-        Ok(schemas::hard_delete_schema_version(&self.pool, subject, version).await?)
+        schemas::hard_delete_schema_version(self, subject, version).await
     }
 
     async fn version_is_soft_deleted(
@@ -294,29 +406,29 @@ impl Storage for PgStorage {
         subject: &str,
         version: i32,
     ) -> Result<bool, KoraError> {
-        Ok(schemas::version_is_soft_deleted(&self.pool, subject, version).await?)
+        schemas::version_is_soft_deleted(self, subject, version).await
     }
 
     async fn version_is_active(&self, subject: &str, version: i32) -> Result<bool, KoraError> {
-        Ok(schemas::version_is_active(&self.pool, subject, version).await?)
+        schemas::version_is_active(self, subject, version).await
     }
 
     // -- Compatibility config --
 
     async fn get_subject_level(&self, subject: &str) -> Result<Option<String>, KoraError> {
-        Ok(compatibility::get_subject_level(&self.pool, subject).await?)
+        compatibility::get_subject_level(self, subject).await
     }
 
     async fn get_global_level(&self) -> Result<String, KoraError> {
-        Ok(compatibility::get_global_level(&self.pool).await?)
+        compatibility::get_global_level(self).await
     }
 
     async fn set_global_level(&self, level: &str, normalize: bool) -> Result<String, KoraError> {
-        Ok(compatibility::set_global_level(&self.pool, level, normalize).await?)
+        compatibility::set_global_level(self, level, normalize).await
     }
 
     async fn reconcile_global_level(&self, level: &str) -> Result<String, KoraError> {
-        Ok(compatibility::reconcile_global_level(&self.pool, level).await?)
+        compatibility::reconcile_global_level(self, level).await
     }
 
     async fn set_subject_level(
@@ -325,83 +437,83 @@ impl Storage for PgStorage {
         level: &str,
         normalize: bool,
     ) -> Result<String, KoraError> {
-        Ok(compatibility::set_subject_level(&self.pool, subject, level, normalize).await?)
+        compatibility::set_subject_level(self, subject, level, normalize).await
     }
 
     async fn delete_subject_level(
         &self,
         subject: &str,
     ) -> Result<Option<(String, bool)>, KoraError> {
-        Ok(compatibility::delete_subject_level(&self.pool, subject).await?)
+        compatibility::delete_subject_level(self, subject).await
     }
 
     async fn get_global_normalize(&self) -> Result<bool, KoraError> {
-        Ok(compatibility::get_global_normalize(&self.pool).await?)
+        compatibility::get_global_normalize(self).await
     }
 
     async fn get_subject_normalize(&self, subject: &str) -> Result<Option<bool>, KoraError> {
-        Ok(compatibility::get_subject_normalize(&self.pool, subject).await?)
+        compatibility::get_subject_normalize(self, subject).await
     }
 
     async fn delete_global_level(&self) -> Result<(String, bool), KoraError> {
-        Ok(compatibility::delete_global_level(&self.pool).await?)
+        compatibility::delete_global_level(self).await
     }
 
     // -- Mode --
 
     async fn get_global_mode(&self) -> Result<String, KoraError> {
-        Ok(mode::get_global_mode(&self.pool).await?)
+        mode::get_global_mode(self).await
     }
 
     async fn set_global_mode(&self, mode_value: &str) -> Result<String, KoraError> {
-        Ok(mode::set_global_mode(&self.pool, mode_value).await?)
+        mode::set_global_mode(self, mode_value).await
     }
 
     async fn delete_global_mode(&self) -> Result<String, KoraError> {
-        Ok(mode::delete_global_mode(&self.pool).await?)
+        mode::delete_global_mode(self).await
     }
 
     async fn get_subject_mode(&self, subject: &str) -> Result<Option<String>, KoraError> {
-        Ok(mode::get_subject_mode(&self.pool, subject).await?)
+        mode::get_subject_mode(self, subject).await
     }
 
     async fn set_subject_mode(&self, subject: &str, mode_value: &str) -> Result<String, KoraError> {
-        Ok(mode::set_subject_mode(&self.pool, subject, mode_value).await?)
+        mode::set_subject_mode(self, subject, mode_value).await
     }
 
     async fn delete_subject_mode(&self, subject: &str) -> Result<Option<String>, KoraError> {
-        Ok(mode::delete_subject_mode(&self.pool, subject).await?)
+        mode::delete_subject_mode(self, subject).await
     }
 
     async fn delete_subject_mode_recursive(
         &self,
         subject: &str,
     ) -> Result<Option<String>, KoraError> {
-        Ok(mode::delete_subject_mode_recursive(&self.pool, subject).await?)
+        mode::delete_subject_mode_recursive(self, subject).await
     }
 
     async fn get_effective_mode(&self, subject: &str) -> Result<String, KoraError> {
-        Ok(mode::get_effective_mode(&self.pool, subject).await?)
+        mode::get_effective_mode(self, subject).await
     }
 
     // -- References --
 
     async fn validate_references(&self, refs: &[SchemaReference]) -> Result<(), KoraError> {
-        references::validate_references(&self.pool, refs).await
+        references::validate_references(self, refs).await
     }
 
     async fn find_references_by_schema_id(
         &self,
         content_id: i64,
     ) -> Result<Vec<SchemaReference>, KoraError> {
-        Ok(references::find_references_by_schema_id(&self.pool, content_id).await?)
+        references::find_references_by_schema_id(self, content_id).await
     }
 
     async fn find_references_for_schema_ids(
         &self,
         content_ids: &[i64],
     ) -> Result<Vec<(i64, SchemaReference)>, KoraError> {
-        Ok(references::find_references_for_schema_ids(&self.pool, content_ids).await?)
+        references::find_references_for_schema_ids(self, content_ids).await
     }
 
     async fn find_referencing_schema_ids(
@@ -412,18 +524,18 @@ impl Storage for PgStorage {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<i64>, KoraError> {
-        Ok(references::find_referencing_schema_ids(
-            &self.pool,
+        references::find_referencing_schema_ids(
+            self,
             target_subject,
             target_version,
             include_deleted,
             offset,
             limit,
         )
-        .await?)
+        .await
     }
 
     async fn is_version_referenced(&self, subject: &str, version: i32) -> Result<bool, KoraError> {
-        Ok(references::is_version_referenced(&self.pool, subject, version).await?)
+        references::is_version_referenced(self, subject, version).await
     }
 }

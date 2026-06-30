@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::error::KoraError;
 use crate::schema::{self, SchemaFormat};
-use crate::storage::{DynStorage, schemas};
+use crate::storage::{DynStorage, types};
 use crate::types::SchemaReference;
 
 // -- Types --
@@ -316,7 +316,7 @@ fn parse_compat_request(
 /// Verify that the new schema type matches the existing one.
 fn check_type_match(
     format: SchemaFormat,
-    existing: &schemas::SchemaVersion,
+    existing: &types::SchemaVersion,
 ) -> Result<(), KoraError> {
     let existing_format = SchemaFormat::from_optional(Some(&existing.schema_type))?;
     if format != existing_format {
@@ -343,7 +343,7 @@ async fn resolve_version(
     storage: &DynStorage,
     subject: &str,
     version: &str,
-) -> Result<schemas::SchemaVersion, KoraError> {
+) -> Result<types::SchemaVersion, KoraError> {
     let row = if version == "latest" {
         storage
             .find_latest_schema_by_subject(subject, false)
