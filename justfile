@@ -37,38 +37,46 @@ dev:
     #!/usr/bin/env bash
     set -euo pipefail
     just ensure-pg
-    trap 'docker compose down' EXIT
+    trap 'docker compose rm -sf postgres >/dev/null 2>&1 || true' EXIT
     cargo run
 
-# Run all tests (starts PG if needed, tears down after)
+# Run the integration suite. Postgres by default; for Oracle: just test oracle
 [group('dev')]
-test:
+test db="postgres":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ "${CI:-}" = "true" ]; then
-      echo "CI — PG managed by service container"
-    elif pg_isready -h localhost -q 2>/dev/null; then
-      echo "PG already running — skipping docker compose"
-    else
-      just ensure-pg
-      trap 'docker compose down' EXIT
-    fi
-    cargo test --test '*' -- --include-ignored
-
-# Run the integration suite against Oracle (starts Oracle Free, tears down after).
-# No Oracle client needed — the oracle-rs driver is pure Rust.
-[group('dev')]
-test-oracle:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    docker compose --profile oracle up -d oracle
-    echo "Waiting for Oracle (first boot is slow)..."
-    until docker compose exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
-    trap 'docker compose --profile oracle down' EXIT
-    DB_BACKEND=oracle DB_HOST=localhost DB_PORT="${ORACLE_PORT:-1521}" \
-      DB_USER="${DB_USER:-kora}" DB_PASSWORD="${DB_PASSWORD:-kora}" DB_NAME=FREEPDB1 \
-      DATABASE_URL= DB_POOL_MAX=2 \
-      cargo test --features oracle --test '*' -- --include-ignored --test-threads=4
+    case "{{ db }}" in
+      postgres)
+        if [ "${CI:-}" = "true" ]; then
+          echo "CI — PG managed by service container"
+        elif pg_isready -h localhost -q 2>/dev/null; then
+          echo "PG already running — skipping docker compose"
+        else
+          just ensure-pg
+          trap 'docker compose rm -sf postgres >/dev/null 2>&1 || true' EXIT
+        fi
+        cargo test --test '*' -- --include-ignored
+        ;;
+      oracle)
+        # Pure-Rust oracle-rs driver — no Oracle client needed. Start a clean
+        # Oracle Free (down -v first so a stale/half-booted instance can't trip
+        # ORA-00600 ksipc), and tear it down on exit. Shares port 1521 with the
+        # loadtest Oracle — stop that first (`just loadtest-stop`).
+        docker compose --profile oracle down -v >/dev/null 2>&1 || true
+        docker compose --profile oracle up -d oracle
+        echo "Waiting for Oracle (first boot is slow)..."
+        until docker compose exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
+        trap 'docker compose --profile oracle down -v' EXIT
+        DB_BACKEND=oracle DB_HOST=localhost DB_PORT="${ORACLE_PORT:-1521}" \
+          DB_USER="${DB_USER:-kora}" DB_PASSWORD="${DB_PASSWORD:-kora}" DB_NAME=FREEPDB1 \
+          DATABASE_URL= DB_POOL_MAX="${DB_POOL_MAX:-2}" \
+          cargo test --features oracle --test '*' -- --include-ignored --test-threads="${TEST_THREADS:-2}"
+        ;;
+      *)
+        echo "unknown backend '{{ db }}' — pass it positionally, e.g. 'just test oracle' (omit for postgres)" >&2
+        exit 2
+        ;;
+    esac
 
 # fmt + lint + test (CI entrypoint)
 [group('quality')]

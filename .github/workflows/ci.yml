@@ -132,7 +132,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Integration suite against Oracle
-        run: cargo test --features oracle --test '*' -- --include-ignored --test-threads=4
+        # Oracle Free is capped at 2 CPU threads and shares this runner with the
+        # test workload; keep concurrency low so concurrent connection creation
+        # doesn't overwhelm it (the pool also retries transient connect refusals).
+        run: cargo test --features oracle --test '*' -- --include-ignored --test-threads=2
 
       - name: Upload test logs on failure
         if: failure()

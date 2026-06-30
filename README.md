@@ -113,7 +113,7 @@ Requires [just](https://github.com/casey/just), [Rust](https://rustup.rs/), and 
 ```bash
 just dev          # Run locally (starts PG via Docker Compose)
 just test         # Run all tests (PostgreSQL)
-just test-oracle  # Run the suite against Oracle (starts Oracle Free; pure-Rust driver)
+just test oracle  # Run the suite against Oracle (starts Oracle Free; pure-Rust driver)
 just ci           # fmt + lint + test (same as CI)
 # ... and more
 just -l     # List all recipes

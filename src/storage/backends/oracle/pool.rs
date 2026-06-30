@@ -117,11 +117,19 @@ impl Drop for CancelGuard<'_> {
     }
 }
 
-/// Skip the liveness ping on checkout when a connection was used within this
-/// window — it is certainly still alive, and the ping costs a round-trip plus a
-/// leaked cursor every time. Idle connections (beyond this) are still pinged so a
-/// stale one is detected and replaced.
-const LIVENESS_BYPASS_WINDOW: Duration = Duration::from_secs(30);
+/// True for transient connection-*establishment* failures worth retrying: a
+/// constrained Oracle (e.g. Oracle Free sharing a 2-vCPU CI runner with the test
+/// workload) momentarily refuses or drops new sessions under concurrent load.
+/// Without this, a refused checkout surfaces directly as a request error.
+fn is_transient_connect(e: &Error) -> bool {
+    let m = e.to_string().to_ascii_lowercase();
+    m.contains("connection refused")
+        || m.contains("connection reset")
+        || m.contains("i/o error")
+        || m.contains("timed out")
+        || m.contains("broken pipe")
+        || m.contains("listener")
+}
 
 /// deadpool manager that creates [`CountedConn`]s and retires them once they have
 /// executed `max_execs` statements (≈ leaked cursors) or have been poisoned.
@@ -135,11 +143,24 @@ impl Manager for CountingManager {
     type Error = Error;
 
     async fn create(&self) -> Result<CountedConn, Error> {
-        let conn = Connection::connect_with_config(self.config.clone()).await?;
-        Ok(CountedConn::new(conn))
+        // Retry transient connection-establishment failures with a short backoff:
+        // a constrained Oracle momentarily refusing new sessions under concurrent
+        // load (common on a small CI runner) would otherwise fail the request
+        // outright — register's checkout (`store.conn().await?`) is not retried.
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match Connection::connect_with_config(self.config.clone()).await {
+                Ok(conn) => return Ok(CountedConn::new(conn)),
+                Err(e) if attempt < 4 && is_transient_connect(&e) => {
+                    tokio::time::sleep(Duration::from_millis(150 * u64::from(attempt))).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
-    async fn recycle(&self, conn: &mut CountedConn, metrics: &Metrics) -> RecycleResult<Error> {
+    async fn recycle(&self, conn: &mut CountedConn, _: &Metrics) -> RecycleResult<Error> {
         // Discard a connection desynced by a cancelled query (issue #11) — it
         // would otherwise hang the next caller.
         if conn.poisoned.load(Relaxed) {
@@ -158,18 +179,13 @@ impl Manager for CountingManager {
                 "retiring connection at cursor-leak threshold",
             ));
         }
-        // Clean any pending transaction (cheap no-op when there is none).
+        // Clean any pending transaction, then verify liveness so a connection the
+        // server dropped (e.g. under CI resource pressure) is replaced rather than
+        // handed to the next caller. The ping is itself a counted statement.
         conn.rollback().await.ok();
-        // Liveness check only for connections idle beyond the keepalive window:
-        // under load a connection is re-borrowed within milliseconds and is
-        // certainly alive, so skip the `SELECT 1 FROM dual` — it is a round-trip
-        // *and* a leaking cursor on every checkout. Mirrors HikariCP's
-        // `aliveBypassWindow`.
-        if metrics.last_used() > LIVENESS_BYPASS_WINDOW {
-            conn.query("SELECT 1 FROM dual", &[])
-                .await
-                .map_err(RecycleError::Backend)?;
-        }
+        conn.query("SELECT 1 FROM dual", &[])
+            .await
+            .map_err(RecycleError::Backend)?;
         Ok(())
     }
 }
