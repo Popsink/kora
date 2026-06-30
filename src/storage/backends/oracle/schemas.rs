@@ -1,7 +1,7 @@
 //! Oracle SQL for the schema-domain `Storage` operations, including the
 //! transactional schema-registration path and the CLOB-aware finders/listings.
 
-use oracle_rs::Connection;
+use super::pool::CountedConn;
 
 use crate::binds;
 use crate::error::KoraError;
@@ -13,7 +13,7 @@ use crate::types::SchemaReference;
 
 use super::OracleStorage;
 use super::driver::{
-    SV_COLS, SV_COLS_META, SV_JOIN, cell_i32, cell_i64, collect_svs, is_unique_violation,
+    SV_COLS, SV_COLS_META, SV_JOIN, cell_i32, cell_i64, collect_svs, i, is_unique_violation,
     like_pattern, query_all, row_to_sv, s, val_i64,
 };
 
@@ -78,9 +78,9 @@ pub(super) async fn find_schema_by_subject_version(
         .query(
             &format!(
                 "SELECT {SV_COLS} {SV_JOIN} \
-                 WHERE sub.name = :1 AND sv.version = {version}{filter}"
+                 WHERE sub.name = :1 AND sv.version = :2{filter}"
             ),
-            &[s(subject)],
+            &[s(subject), i(i64::from(version))],
         )
         .await?;
     match result.first() {
@@ -137,9 +137,9 @@ pub(super) async fn find_schema_by_subject_id_and_fingerprint(
         .query(
             &format!(
                 "SELECT {SV_COLS} {SV_JOIN} \
-                 WHERE sv.subject_id = {subject_id} AND sc.{fp_col} = :1{filter}"
+                 WHERE sv.subject_id = :1 AND sc.{fp_col} = :2{filter}"
             ),
-            &[s(fingerprint)],
+            &[i(subject_id), s(fingerprint)],
         )
         .await?;
     match result.first() {
@@ -155,8 +155,8 @@ pub(super) async fn find_schema_by_id(
     let conn = store.conn().await?;
     let result = conn
         .query(
-            &format!("SELECT schema_text, schema_type FROM schema_contents WHERE id = {id}"),
-            &[],
+            "SELECT schema_text, schema_type FROM schema_contents WHERE id = :1",
+            &[i(id)],
         )
         .await?;
     match result.first() {
@@ -471,7 +471,7 @@ pub(super) async fn version_is_active(
 /// `register_schema_atomically` can safely retry it on a fresh connection after
 /// a transient connection-level failure (see `is_transient`).
 async fn register_once(
-    conn: &Connection,
+    conn: &CountedConn,
     subject_name: &str,
     schema: &NewSchema<'_>,
     refs: &[SchemaReference],
@@ -587,7 +587,7 @@ fn is_transient(e: &KoraError) -> bool {
 }
 
 /// Upsert a subject by name and return its id, holding a row lock on it.
-async fn upsert_subject(conn: &Connection, name: &str) -> Result<i64, KoraError> {
+async fn upsert_subject(conn: &CountedConn, name: &str) -> Result<i64, KoraError> {
     let updated = conn
         .execute_dml_sql(
             "UPDATE subjects SET deleted = 0, updated_at = SYSTIMESTAMP WHERE name = :1",
@@ -623,7 +623,7 @@ async fn upsert_subject(conn: &Connection, name: &str) -> Result<i64, KoraError>
 
 /// Deduplicate schema content globally and return its id (`ON CONFLICT
 /// (raw_fingerprint)` equivalent).
-async fn upsert_content(conn: &Connection, schema: &NewSchema<'_>) -> Result<i64, KoraError> {
+async fn upsert_content(conn: &CountedConn, schema: &NewSchema<'_>) -> Result<i64, KoraError> {
     let raw_fp = schema.raw_fingerprint;
     let existing = conn
         .query(
@@ -674,7 +674,7 @@ async fn upsert_content(conn: &Connection, schema: &NewSchema<'_>) -> Result<i64
 
 /// Run the in-transaction compatibility check (mirror of the Postgres path).
 async fn run_compat_check(
-    conn: &Connection,
+    conn: &CountedConn,
     subject_id: i64,
     compat: CompatCheck,
 ) -> Result<(), KoraError> {

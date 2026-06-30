@@ -641,16 +641,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deadpool-oracle"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13166537898cf51a12f385bda1b839a9b817d7338df77a65c65ef9255bc43395"
-dependencies = [
- "deadpool",
- "oracle-rs",
-]
-
-[[package]]
 name = "deadpool-runtime"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1557,7 +1547,7 @@ dependencies = [
  "apache-avro",
  "async-trait",
  "axum",
- "deadpool-oracle",
+ "deadpool",
  "figment",
  "hex",
  "jsonschema",

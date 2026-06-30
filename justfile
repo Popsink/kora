@@ -93,65 +93,110 @@ ensure-loadtest-pg:
       echo "Waiting for load test PG..."; until {{ loadtest_pg_ready }}; do sleep 0.3; done; }
     @{{ loadtest_pg }} exec -T postgres psql -U kora -d kora_loadtest -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" > /dev/null 2>&1 || true
 
-# Run a k6 scenario: starts PG + Kora automatically, tears down after
 [private]
-loadtest-run scenario *k6args:
+ensure-loadtest-oracle:
     #!/usr/bin/env bash
     set -euo pipefail
-    just ensure-loadtest-pg
+    {{ loadtest_pg }} --profile oracle up -d oracle
+    echo "Waiting for load test Oracle to become healthy (each run boots a fresh DB — can take 2-4 min; do not interrupt)..."
+    until {{ loadtest_pg }} exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
+    # Raise open_cursors to a production-like value (a stock gvenzl image defaults
+    # to 300). The pure-Rust driver leaks a server cursor per statement, so Kora
+    # retires a connection before ORACLE_MAX_QUERIES_PER_CONN; a generous
+    # open_cursors keeps retirement infrequent and ensures no single request's
+    # statement burst reaches the limit — exactly how a production DB is sized.
+    echo "ALTER SYSTEM SET open_cursors=1000;" \
+      | {{ loadtest_pg }} exec -T oracle sqlplus -s system/oracle@localhost:1521/FREEPDB1
+    echo "Oracle ready (open_cursors=1000)."
 
-    # Build + start Kora in background
-    cargo build --quiet
-    DB_POOL_MAX=${DB_POOL_MAX:-20} DATABASE_URL={{ loadtest_db }} ./target/debug/kora &
+# Run a k6 scenario against `backend` (postgres|oracle): starts the DB + Kora, tears down after
+[private]
+loadtest-run scenario backend="postgres" *k6args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Pick the database, build features, and connection env per backend.
+    case "{{ backend }}" in
+      postgres)
+        just ensure-loadtest-pg
+        cargo build --quiet
+        export DATABASE_URL="{{ loadtest_db }}"
+        ;;
+      oracle)
+        just ensure-loadtest-oracle
+        cargo build --quiet --features oracle
+        export DB_BACKEND=oracle DB_HOST=localhost DB_PORT=1521 \
+          DB_USER=kora DB_PASSWORD=kora DB_NAME=FREEPDB1 DATABASE_URL=""
+        ;;
+      *)
+        echo "unknown backend '{{ backend }}' — pass it positionally, e.g. 'just stress oracle' (omit for postgres)" >&2
+        exit 2
+        ;;
+    esac
+
+    # Start Kora in background.
+    DB_POOL_MAX=${DB_POOL_MAX:-20} ./target/debug/kora &
     KORA_PID=$!
     trap 'kill $KORA_PID 2>/dev/null; wait $KORA_PID 2>/dev/null' EXIT
 
-    # Wait for Kora to be ready
-    echo "Waiting for Kora..."
+    echo "Waiting for Kora ({{ backend }})..."
     until curl -sf http://localhost:8080/health > /dev/null 2>&1; do sleep 0.2; done
-    echo "Kora ready — running {{ scenario }}"
+    echo "Kora ready — running {{ scenario }} against {{ backend }}"
 
     k6 run -e KORA_URL=http://localhost:8080 {{ k6args }} loadtest/scenarios/{{ scenario }}
 
-# Quick baseline — 1 VU, 30s
+# Quick baseline — 1 VU, 30s. Postgres by default; for Oracle: just smoke oracle
 [group('loadtest')]
-smoke:
-    just loadtest-run smoke.js
+smoke db="postgres":
+    just loadtest-run smoke.js {{ db }}
 
-# Nominal production load — named scenarios, 5min
+# Nominal production load — 5min. Postgres by default; for Oracle: just load oracle
 [group('loadtest')]
-load:
-    just loadtest-run load.js
+load db="postgres":
+    just loadtest-run load.js {{ db }}
 
-# Find the breaking point — ramp to 300 VUs
+# Find the breaking point — ramp to 300 VUs. Postgres by default; for Oracle: just stress oracle
 [group('loadtest')]
-stress:
-    just loadtest-run stress.js
+stress db="postgres":
+    just loadtest-run stress.js {{ db }}
 
-# Long-running accumulation — 2h (override with K6_SOAK_DURATION)
+# Long-running accumulation — 2h, override K6_SOAK_DURATION. Postgres by default; for Oracle: just soak oracle
 [group('loadtest')]
-soak:
-    just loadtest-run soak.js --out csv=loadtest/soak-results.csv
+soak db="postgres":
+    just loadtest-run soak.js {{ db }} --out csv=loadtest/soak-results.csv
 
-# FOR UPDATE lock contention — single subject
+# FOR UPDATE lock contention — single subject. Postgres by default; for Oracle: just contention oracle
 [group('loadtest')]
-contention:
-    just loadtest-run contention.js
+contention db="postgres":
+    just loadtest-run contention.js {{ db }}
 
-# Delete under concurrent writes
+# Delete under concurrent writes. Postgres by default; for Oracle: just delete-load oracle
 [group('loadtest')]
-delete-load:
-    just loadtest-run delete-under-load.js
+delete-load db="postgres":
+    just loadtest-run delete-under-load.js {{ db }}
 
-# Run PG monitoring queries (in another terminal during a test)
+# DB monitoring, in another terminal DURING a load test. Postgres by default; for Oracle: just monitor oracle
 [group('loadtest')]
-pg-monitor:
-    {{ loadtest_pg }} exec -T postgres psql -U kora -d kora_loadtest -f /dev/stdin < loadtest/pg-monitor.sql
+monitor db="postgres":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ db }}" in
+      postgres)
+        {{ loadtest_pg }} exec -T postgres psql -U kora -d kora_loadtest -f /dev/stdin < loadtest/pg-monitor.sql
+        ;;
+      oracle)
+        {{ loadtest_pg }} exec -T oracle sqlplus -s system/oracle@localhost:1521/FREEPDB1 < loadtest/oracle-monitor.sql
+        ;;
+      *)
+        echo "unknown backend '{{ db }}' — pass it positionally, e.g. 'just monitor oracle' (omit for postgres)" >&2
+        exit 2
+        ;;
+    esac
 
-# Stop load test infrastructure and wipe data
+# Stop load test infrastructure (PG + Oracle) and wipe data
 [group('loadtest')]
 loadtest-stop:
-    {{ loadtest_pg }} down -v
+    {{ loadtest_pg }} --profile oracle down -v
 
 # ---------- Migration ----------
 

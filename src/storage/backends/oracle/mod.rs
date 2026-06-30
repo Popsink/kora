@@ -1,7 +1,7 @@
 //! Oracle storage backend (behind the `oracle` cargo feature).
 //!
 //! Uses the **pure-Rust** [`oracle_rs`] driver (Oracle TNS/TTC protocol, no OCI /
-//! ODPI-C / Instant Client) with a [`deadpool_oracle`] connection pool. The whole
+//! ODPI-C / Instant Client) with a `deadpool`-based connection pool. The whole
 //! backend is async-native — no `spawn_blocking` bridge — and an Oracle-enabled
 //! build remains a single self-contained binary that connects over TCP, exactly
 //! like the Postgres path.
@@ -13,7 +13,9 @@
 //! methods, and an [`Storage`] impl whose non-lifecycle methods each delegate in
 //! one line to a per-domain SQL module (`subjects`, `schemas`, `compatibility`,
 //! `mode`, `references`). The `oracle_rs` driver workarounds and the row-decode
-//! machinery live in [`driver`].
+//! machinery live in [`driver`]; the cursor-leak-safe connection pool (which
+//! retires a connection before it exhausts Oracle's `open_cursors`) lives in
+//! [`pool`].
 //!
 //! [`conn`]: OracleStorage::conn
 //!
@@ -43,13 +45,15 @@
 pub mod compatibility;
 pub mod driver;
 pub mod mode;
+pub mod pool;
 pub mod references;
 pub mod schemas;
 pub mod subjects;
 
 use async_trait::async_trait;
-use deadpool_oracle::{Object, Pool, PoolBuilder};
 use oracle_rs::Config;
+
+use pool::{Object, Pool};
 
 use crate::error::KoraError;
 use crate::storage::sql::{Bind, SqlExecutor};
@@ -85,12 +89,15 @@ impl OracleStorage {
         username: &str,
         password: &str,
         max_connections: u32,
+        max_queries_per_conn: usize,
     ) -> Result<Self, KoraError> {
         let config = Config::new(host, port, service, username, password);
-        let pool = PoolBuilder::new(config)
-            .max_size(max_connections.max(1) as usize)
-            .build()
-            .map_err(|e| KoraError::BackendDataStore(e.to_string()))?;
+        let pool = pool::build(
+            config,
+            max_connections.max(1) as usize,
+            max_queries_per_conn,
+        )
+        .map_err(|e| KoraError::BackendDataStore(e.to_string()))?;
         Ok(Self { pool })
     }
 

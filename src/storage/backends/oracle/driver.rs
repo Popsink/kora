@@ -19,19 +19,21 @@
 //!   response mis-decodes ("buffer underflow"), so `schema_text` is excluded
 //!   from multi-row metadata queries ([`SV_COLS_META`]) and read in adaptive,
 //!   self-splitting batches ([`fetch_schema_texts`]); single-row reads embed it.
-//! * **Cursor leak.** Each `query` (SELECT) leaks a server cursor for the
-//!   connection's lifetime, so a single connection can serve only `open_cursors`
-//!   (typically 300+) SELECTs before the server drops it. The batching above
-//!   keeps any one request's query count low; deadpool transparently replaces a
-//!   dropped connection. Very large unbounded listings on one connection remain
-//!   bounded by `open_cursors` — Postgres stays the backend for heavy fleets.
+//! * **Cursor leak.** Each `query`/`execute` leaks a server cursor for the
+//!   connection's lifetime (the driver never closes them), so a single connection
+//!   can serve only `open_cursors` (typically 300+) statements before the server
+//!   drops it. The batching above keeps any one request's statement count low, and
+//!   [`super::pool`] proactively retires a connection before it reaches the limit
+//!   (counting statements per connection) — releasing all its cursors. Together
+//!   they keep sustained load under the ceiling.
 
 use std::collections::HashMap;
 
 use oracle_rs::types::LobValue;
-use oracle_rs::{Connection, QueryResult, Row, Value};
+use oracle_rs::{QueryResult, Row, Value};
 
 use crate::error::KoraError;
+use crate::storage::backends::oracle::pool::CountedConn;
 use crate::storage::sql::{Bind, Row as SqlRow};
 use crate::storage::types::SchemaVersion;
 
@@ -128,6 +130,17 @@ pub(super) fn s(v: &str) -> Value {
     Value::from(v)
 }
 
+/// Bind an integer value as a `:N` placeholder.
+///
+/// Per-execution integers (ids, versions) must be **bound**, not inlined into the
+/// SQL text: an inlined literal produces a distinct SQL string per value, forcing
+/// a hard parse — and a dynamic-sampling (`OPT_DYN_SAMP`) pass — on every call.
+/// Binding keeps the SQL text constant so the statement parses once and its cursor
+/// is shared. Only table/column **identifiers** may be `format!`-inlined.
+pub(super) fn i(v: i64) -> Value {
+    Value::from(v)
+}
+
 /// Extract an `i64` from a column value.
 ///
 /// The `oracle-rs` driver returns Oracle `NUMBER` columns (including identity
@@ -141,7 +154,7 @@ pub(super) fn val_i64(v: Option<&Value>) -> Option<i64> {
 }
 
 /// Extract a text column, transparently reading CLOBs (inline or via locator).
-pub(super) async fn cell_text(conn: &Connection, v: Option<&Value>) -> Result<String, KoraError> {
+pub(super) async fn cell_text(conn: &CountedConn, v: Option<&Value>) -> Result<String, KoraError> {
     match v {
         Some(Value::String(s)) => Ok(s.clone()),
         Some(Value::Bytes(b)) => Ok(String::from_utf8_lossy(b).into_owned()),
@@ -165,7 +178,7 @@ pub(super) fn cell_i32(row: &Row, idx: usize) -> Result<i32, KoraError> {
 }
 
 /// Map a row selecting [`SV_COLS`] (in order) to a [`SchemaVersion`].
-pub(super) async fn row_to_sv(conn: &Connection, row: &Row) -> Result<SchemaVersion, KoraError> {
+pub(super) async fn row_to_sv(conn: &CountedConn, row: &Row) -> Result<SchemaVersion, KoraError> {
     Ok(SchemaVersion {
         id: cell_i64(row, 0)?,
         subject: cell_text(conn, row.get(1)).await?,
@@ -179,7 +192,7 @@ pub(super) async fn row_to_sv(conn: &Connection, row: &Row) -> Result<SchemaVers
 /// Collect rows selecting [`SV_COLS_META`] (4 columns, no CLOB) as
 /// [`SchemaVersion`]s, fetching their `schema_text` CLOBs in batches.
 pub(super) async fn collect_svs(
-    conn: &Connection,
+    conn: &CountedConn,
     result: &QueryResult,
 ) -> Result<Vec<SchemaVersion>, KoraError> {
     let ids = result
@@ -223,7 +236,7 @@ pub(super) fn is_buffer_underflow(e: &oracle_rs::Error) -> bool {
 /// batches — few queries — and any batch that trips the decode fault is split
 /// in half and retried, down to a single row, which always decodes correctly.
 pub(super) async fn fetch_schema_texts(
-    conn: &Connection,
+    conn: &CountedConn,
     ids: &[i64],
 ) -> Result<HashMap<i64, String>, KoraError> {
     let mut map = HashMap::with_capacity(ids.len());
@@ -289,7 +302,7 @@ const ORACLE_FETCH_SIZE: usize = 100;
 /// paging). `limit < 0` means unbounded. The aggregated rows are returned as a
 /// single [`QueryResult`] so callers consume them exactly as a normal query.
 pub(super) async fn query_all(
-    conn: &Connection,
+    conn: &CountedConn,
     base_sql: &str,
     params: &[Value],
     offset: i64,

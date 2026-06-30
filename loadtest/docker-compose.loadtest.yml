@@ -29,5 +29,27 @@ services:
       timeout: 3s
       retries: 10
 
+  # Oracle backend for the `*-oracle` load-test recipes. Behind a profile so the
+  # default `up` only starts Postgres; only one backend runs at a time (shares
+  # port 1521 with the test/dev Oracle — stop those first). Intentionally NO
+  # persistent volume: Oracle Free's DB creation is fragile to interruption, and a
+  # half-initialised oradata volume fails to restart (ORA-00600 ksipc). Ephemeral
+  # means a fresh ~2-4 min boot each run, but robust (matches the test Oracle).
+  oracle:
+    image: gvenzl/oracle-free:slim
+    profiles: ["oracle"]
+    environment:
+      ORACLE_PASSWORD: oracle
+      APP_USER: kora
+      APP_USER_PASSWORD: kora
+    ports:
+      - "1521:1521"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 90s
+
 volumes:
   loadtest-pgdata:

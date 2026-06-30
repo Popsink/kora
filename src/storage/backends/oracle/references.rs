@@ -7,7 +7,7 @@ use crate::storage::sql::{Row as SqlRow, SqlExecutor};
 use crate::types::SchemaReference;
 
 use super::OracleStorage;
-use super::driver::{cell_i32, cell_i64, query_all, s, val_i64};
+use super::driver::{cell_i32, cell_i64, i, query_all, s, val_i64};
 
 pub(super) async fn validate_references(
     store: &OracleStorage,
@@ -17,15 +17,12 @@ pub(super) async fn validate_references(
     for r in refs {
         let result = conn
             .query(
-                &format!(
-                    "SELECT CASE WHEN EXISTS (\
-                        SELECT 1 FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id \
-                        WHERE sub.name = :1 AND sv.version = {} \
-                          AND sv.deleted = 0 AND sub.deleted = 0\
-                     ) THEN 1 ELSE 0 END FROM dual",
-                    r.version
-                ),
-                &[s(&r.subject)],
+                "SELECT CASE WHEN EXISTS (\
+                    SELECT 1 FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id \
+                    WHERE sub.name = :1 AND sv.version = :2 \
+                      AND sv.deleted = 0 AND sub.deleted = 0\
+                 ) THEN 1 ELSE 0 END FROM dual",
+                &[s(&r.subject), i(i64::from(r.version))],
             )
             .await?;
         if result.first().and_then(|row| val_i64(row.get(0))) != Some(1) {
