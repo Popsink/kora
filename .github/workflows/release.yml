@@ -37,32 +37,41 @@ jobs:
     name: release-plz
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    # Always runs so that dependent jobs are never skipped due to a skipped needs entry.
+    # On workflow_dispatch the release-plz steps are gated individually and the final
+    # "Resolve outputs" step short-circuits with the provided version.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     permissions:
       contents: write
       pull-requests: write
     outputs:
-      releases_created: ${{ steps.release.outputs.releases_created }}
-      version: ${{ steps.version.outputs.version }}
+      releases_created: ${{ steps.resolve.outputs.releases_created }}
+      version: ${{ steps.resolve.outputs.version }}
 
     steps:
       - uses: actions/checkout@v7
+        if: github.event_name == 'workflow_run'
         with:
           fetch-depth: 0
 
       - name: Install Rust toolchain
+        if: github.event_name == 'workflow_run'
         uses: dtolnay/rust-toolchain@1.94.0
 
       - uses: Swatinem/rust-cache@v2
+        if: github.event_name == 'workflow_run'
 
       - name: Run release-plz
+        if: github.event_name == 'workflow_run'
         id: release
         uses: release-plz/action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract version
-        if: steps.release.outputs.releases_created == 'true'
+        if: github.event_name == 'workflow_run' && steps.release.outputs.releases_created == 'true'
         id: version
         env:
           RELEASES: ${{ steps.release.outputs.releases }}
@@ -70,12 +79,21 @@ jobs:
           VERSION=$(echo "$RELEASES" | jq -r '.[0].version')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve outputs
+        id: resolve
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "releases_created=true" >> "$GITHUB_OUTPUT"
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "releases_created=${{ steps.release.outputs.releases_created }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build (${{ matrix.variant }}, ${{ matrix.platform_pair }})
     needs: release-plz
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      needs.release-plz.outputs.releases_created == 'true'
+    if: needs.release-plz.outputs.releases_created == 'true'
     permissions:
       packages: write
     strategy:
@@ -150,10 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [release-plz, build]
-    if: >-
-      needs.build.result == 'success' &&
-      (github.event_name == 'workflow_dispatch' ||
-       needs.release-plz.outputs.releases_created == 'true')
+    if: needs.build.result == 'success' && needs.release-plz.outputs.releases_created == 'true'
     permissions:
       packages: write
     strategy:
@@ -182,7 +197,7 @@ jobs:
 
       - name: Create and push multi-arch manifest
         env:
-          VERSION: ${{ inputs.version || needs.release-plz.outputs.version }}
+          VERSION: ${{ needs.release-plz.outputs.version }}
           VARIANT: ${{ matrix.variant }}
         working-directory: /tmp/digests
         run: |
@@ -196,10 +211,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [release-plz, merge]
-    if: >-
-      needs.merge.result == 'success' &&
-      (github.event_name == 'workflow_dispatch' ||
-       needs.release-plz.outputs.releases_created == 'true')
+    if: needs.merge.result == 'success' && needs.release-plz.outputs.releases_created == 'true'
     permissions:
       packages: write
 
@@ -216,7 +228,7 @@ jobs:
 
       - name: Stamp chart version
         env:
-          VERSION: ${{ inputs.version || needs.release-plz.outputs.version }}
+          VERSION: ${{ needs.release-plz.outputs.version }}
         run: |
           sed -i "s|^version:.*|version: ${VERSION}|" chart/Chart.yaml
           sed -i "s|^appVersion:.*|appVersion: ${VERSION}|" chart/Chart.yaml
@@ -232,5 +244,5 @@ jobs:
 
       - name: Push chart to GHCR
         env:
-          VERSION: ${{ inputs.version || needs.release-plz.outputs.version }}
+          VERSION: ${{ needs.release-plz.outputs.version }}
         run: helm push "kora-${VERSION}.tgz" ${{ env.CHART }}
