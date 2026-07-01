@@ -15,17 +15,18 @@ use axum::{
     routing::{get, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
-use sqlx::PgPool;
+
+use crate::storage::DynStorage;
 
 // -- State --
 
 /// Shared application state extracted by handlers via axum's `State`.
 ///
-/// `FromRef` lets handlers keep extracting `State<PgPool>` directly —
-/// no handler signature changes required.
+/// `FromRef` lets handlers extract `State<DynStorage>` (the backend-agnostic
+/// storage handle) and `State<PrometheusHandle>` directly.
 #[derive(Clone, FromRef)]
 struct AppState {
-    pool: PgPool,
+    storage: DynStorage,
     metrics_handle: PrometheusHandle,
 }
 
@@ -37,9 +38,13 @@ async fn root() -> impl IntoResponse {
 }
 
 /// Build the application router with all routes.
-pub fn router(pool: PgPool, metrics_handle: PrometheusHandle, max_body_size: usize) -> Router {
+pub fn router(
+    storage: DynStorage,
+    metrics_handle: PrometheusHandle,
+    max_body_size: usize,
+) -> Router {
     let state = AppState {
-        pool,
+        storage,
         metrics_handle,
     };
 

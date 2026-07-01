@@ -14,7 +14,12 @@ async fn main() {
 
     let cfg = KoraConfig::load().expect("failed to load configuration");
 
-    tracing::info!(host = %cfg.host, port = %cfg.port, "starting Kora");
+    tracing::info!(
+        host = %cfg.host,
+        port = %cfg.port,
+        backend = ?cfg.db_backend,
+        "starting Kora"
+    );
 
     let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
@@ -38,18 +43,23 @@ async fn main() {
         "Idle database connections in the pool"
     );
 
-    let pool = storage::create_pool(&cfg.database_url, cfg.db_pool_max)
+    let storage = storage::connect(&cfg)
         .await
         .expect("failed to connect to database");
+
+    storage
+        .migrate()
+        .await
+        .expect("failed to run database migrations");
 
     // Reconcile the declaratively-configured default compatibility level into the
     // global config row: DEFAULT_COMPATIBILITY is the source of truth on every
     // startup, overwriting any runtime PUT/DELETE /config change to the global
     // level. Per-subject overrides are untouched.
-    if let Some(applied) =
-        storage::apply_startup_config(&pool, cfg.default_compatibility.as_deref())
-            .await
-            .expect("failed to reconcile global compatibility level")
+    if let Some(applied) = storage
+        .apply_startup_config(cfg.default_compatibility.as_deref())
+        .await
+        .expect("failed to reconcile global compatibility level")
     {
         tracing::info!(
             compatibility = %applied,
@@ -57,7 +67,7 @@ async fn main() {
         );
     }
 
-    let app = api::router(pool, metrics_handle, cfg.max_body_size);
+    let app = api::router(storage, metrics_handle, cfg.max_body_size);
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr)
         .await

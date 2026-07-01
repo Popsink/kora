@@ -1,5 +1,6 @@
 /target
 .env
+.devbox/
 .github/copilot-instructions.md
 .github/hooks/
 test-artifacts/

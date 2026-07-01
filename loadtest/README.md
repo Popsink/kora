@@ -11,16 +11,19 @@ k6 load tests for Kora schema registry.
 ## Quick start
 
 ```bash
-just smoke
+just smoke          # Postgres (default)
+just smoke oracle   # Oracle (gvenzl/oracle-free; boots a fresh DB each run, ~2-4 min)
 ```
 
-That's it. Each recipe automatically:
-1. Starts a dedicated PostgreSQL (port 5433, with `pg_stat_statements`)
-2. Builds and starts Kora against it
-3. Runs the k6 scenario
+Every recipe takes an optional backend argument — `postgres` (the default) or `oracle`. `just` arguments are **positional**, so it's `just smoke oracle`, not `backend=oracle`. Either way the recipe automatically:
+1. Starts a dedicated database — PostgreSQL (port 5433, `pg_stat_statements`) or Oracle Free (port 1521)
+2. Builds Kora (with `--features oracle` for Oracle) and starts it against that DB
+3. Runs the k6 scenario (scenarios are backend-agnostic — they only hit Kora's HTTP API)
 4. Kills Kora when done
 
-Override pool size: `DB_POOL_MAX=50 just stress`
+Override pool size: `DB_POOL_MAX=50 just stress` (or `DB_POOL_MAX=50 just stress oracle`).
+
+> Only one backend runs at a time; the Oracle service shares port 1521 with the dev/test Oracle, so stop those first. `just loadtest-stop` tears down both and wipes the volumes.
 
 ## Scenarios
 
@@ -32,6 +35,14 @@ Override pool size: `DB_POOL_MAX=50 just stress`
 | `just soak` | soak.js | 30 | 2h | Query degradation, dead tuples, table bloat |
 | `just contention` | contention.js | 10 → 50 (ramp) | 5 min | FOR UPDATE lock, MAX(version)+1, TOCTOU |
 | `just delete-load` | delete-under-load.js | 10 writers + 5 deleters + 5 readers | 3 min | Delete race conditions, reference protection |
+
+Append `oracle` to any recipe (e.g. `just stress oracle`, `just soak oracle`) to run the same HTTP load against Oracle instead of Postgres — only the backend Kora talks to changes.
+
+## Oracle backend
+
+Kora supports Oracle in production, so the same scenarios run against it: `just <scenario> oracle` (e.g. `just stress oracle`) spins up Oracle Free, builds Kora with `--features oracle`, and points it at `FREEPDB1`.
+
+> **Driver.** Kora's Oracle backend uses the mature [`oracle`](https://crates.io/crates/oracle) crate (ODPI-C / Oracle Instant Client). It closes server cursors on statement completion (no cursor leak) and reads CLOBs natively, so there is no connection-recycling workaround and no special `open_cursors` tuning — the gvenzl default is fine. The blocking driver is bridged onto the async runtime with one `spawn_blocking` per operation, bounded by a semaphore sized to `DB_POOL_MAX`. The load-test host must have the Instant Client libraries installed.
 
 ## Interpreting results
 
@@ -57,7 +68,7 @@ Monitor PostgreSQL during the run:
 
 ```bash
 # In another terminal, periodically:
-just pg-monitor
+just monitor
 ```
 
 Watch for:
@@ -85,9 +96,19 @@ The `contention_version_count` custom metric tracks how many versions accumulate
 
 ## PostgreSQL monitoring
 
-The load test PostgreSQL image has `pg_stat_statements` enabled. Run `just pg-monitor` during tests to see:
+The load test PostgreSQL image has `pg_stat_statements` enabled. Run `just monitor` during tests to see:
 
 - Connection state and lock contention
 - Dead tuple accumulation per table
 - Top queries by total execution time
 - Buffer hit ratio
+
+## Oracle monitoring
+
+Run `just monitor oracle` during an Oracle test (connects as `SYSTEM`, since the `V$` views aren't granted to `kora`) to see:
+
+- The `open_cursors` ceiling and open cursors per `kora` session (stays low/stable — the thick `oracle` driver closes cursors on statement completion, so there is no leak to watch for)
+- Active `kora` sessions and their wait events
+- Top SQL by elapsed time
+- Blocking sessions (lock contention)
+

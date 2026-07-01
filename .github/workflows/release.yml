@@ -86,18 +86,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push (PostgreSQL, static musl)
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: dockerfiles/postgres.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ env.IMAGE }}:v${{ needs.release-plz.outputs.version }}
-            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:v${{ needs.release-plz.outputs.version }}-postgres
+            ${{ env.IMAGE }}:latest-postgres
           provenance: false
           cache-from: type=gha,scope=docker
           cache-to: type=gha,mode=max,scope=docker
+
+      # Oracle variant (glibc + Oracle Instant Client). The non-native arch builds
+      # under QEMU emulation (slower, but this is a release job). Published under
+      # distinct `-oracle` tags.
+      - name: Build and push (Oracle, glibc + Instant Client)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: dockerfiles/oracle.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:v${{ needs.release-plz.outputs.version }}-oracle
+            ${{ env.IMAGE }}:latest-oracle
+          provenance: false
+          cache-from: type=gha,scope=docker-oracle
+          cache-to: type=gha,mode=max,scope=docker-oracle
 
   helm:
     name: Helm chart

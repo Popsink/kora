@@ -285,6 +285,7 @@ async fn get_global_compatibility_accepts_python_style_default_to_global() {
 }
 
 #[tokio::test]
+#[serial]
 async fn get_subject_compatibility_accepts_python_style_default_to_global() {
     let base = common::spawn_server().await;
     let client = Client::new();
@@ -316,56 +317,40 @@ async fn get_subject_compatibility_accepts_python_style_default_to_global() {
 #[tokio::test]
 #[serial]
 async fn apply_startup_config_overrides_stored_global_level() {
-    let pool = common::pool().await;
+    let storage = common::storage().await;
 
     // A previously-stored level (e.g. set by an operator via PUT /config).
-    kora::storage::compatibility::set_global_level(&pool, "FORWARD", false)
-        .await
-        .unwrap();
+    storage.set_global_level("FORWARD", false).await.unwrap();
 
-    let applied = kora::storage::apply_startup_config(&pool, Some("NONE"))
-        .await
-        .unwrap();
+    let applied = storage.apply_startup_config(Some("NONE")).await.unwrap();
     assert_eq!(applied.as_deref(), Some("NONE"));
 
-    let stored = kora::storage::compatibility::get_global_level(&pool)
-        .await
-        .unwrap();
+    let stored = storage.get_global_level().await.unwrap();
     assert_eq!(stored, "NONE", "the declared default must win on startup");
 
     // Restore the suite default.
-    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
-        .await
-        .unwrap();
+    storage.set_global_level("BACKWARD", false).await.unwrap();
 }
 
 /// With no configured default, startup is a no-op and leaves the stored level alone.
 #[tokio::test]
 #[serial]
 async fn apply_startup_config_without_default_is_noop() {
-    let pool = common::pool().await;
+    let storage = common::storage().await;
 
-    kora::storage::compatibility::set_global_level(&pool, "FULL", false)
-        .await
-        .unwrap();
+    storage.set_global_level("FULL", false).await.unwrap();
 
-    let applied = kora::storage::apply_startup_config(&pool, None)
-        .await
-        .unwrap();
+    let applied = storage.apply_startup_config(None).await.unwrap();
     assert_eq!(applied, None);
 
-    let stored = kora::storage::compatibility::get_global_level(&pool)
-        .await
-        .unwrap();
+    let stored = storage.get_global_level().await.unwrap();
     assert_eq!(
         stored, "FULL",
         "no declared default must leave the stored level untouched"
     );
 
     // Restore the suite default.
-    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
-        .await
-        .unwrap();
+    storage.set_global_level("BACKWARD", false).await.unwrap();
 }
 
 /// Startup reconciliation never clobbers per-subject overrides
@@ -373,35 +358,28 @@ async fn apply_startup_config_without_default_is_noop() {
 #[tokio::test]
 #[serial]
 async fn apply_startup_config_preserves_subject_overrides() {
-    let pool = common::pool().await;
+    let storage = common::storage().await;
     let subject = format!("startup-compat-{}", uuid::Uuid::new_v4());
 
-    kora::storage::compatibility::set_subject_level(&pool, &subject, "FORWARD", false)
+    storage
+        .set_subject_level(&subject, "FORWARD", false)
         .await
         .unwrap();
 
-    kora::storage::apply_startup_config(&pool, Some("FULL"))
-        .await
-        .unwrap();
+    storage.apply_startup_config(Some("FULL")).await.unwrap();
 
-    let subject_level = kora::storage::compatibility::get_subject_level(&pool, &subject)
-        .await
-        .unwrap();
+    let subject_level = storage.get_subject_level(&subject).await.unwrap();
     assert_eq!(
         subject_level.as_deref(),
         Some("FORWARD"),
         "per-subject override must survive startup reconciliation"
     );
 
-    let global = kora::storage::compatibility::get_global_level(&pool)
-        .await
-        .unwrap();
+    let global = storage.get_global_level().await.unwrap();
     assert_eq!(global, "FULL");
 
     // Restore the suite default.
-    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
-        .await
-        .unwrap();
+    storage.set_global_level("BACKWARD", false).await.unwrap();
 }
 
 /// Reconcile changes only the compatibility level — it leaves the global
@@ -409,30 +387,49 @@ async fn apply_startup_config_preserves_subject_overrides() {
 #[tokio::test]
 #[serial]
 async fn reconcile_global_level_preserves_normalize_flag() {
-    let pool = common::pool().await;
+    let storage = common::storage().await;
 
     // Configure the global row with normalize = true via the regular API path.
-    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", true)
-        .await
-        .unwrap();
+    storage.set_global_level("BACKWARD", true).await.unwrap();
 
-    kora::storage::compatibility::reconcile_global_level(&pool, "FULL")
-        .await
-        .unwrap();
+    storage.reconcile_global_level("FULL").await.unwrap();
 
-    let normalize =
-        sqlx::query_scalar::<_, Option<bool>>("SELECT normalize FROM config WHERE subject IS NULL")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        normalize,
-        Some(true),
-        "reconcile must not reset the normalize flag"
-    );
+    let normalize = storage.get_global_normalize().await.unwrap();
+    assert!(normalize, "reconcile must not reset the normalize flag");
 
     // Restore the suite default.
-    kora::storage::compatibility::set_global_level(&pool, "BACKWARD", false)
+    storage.set_global_level("BACKWARD", false).await.unwrap();
+}
+
+/// A boolean config column must round-trip both `true` and `false`. This guards
+/// the Oracle path: booleans are stored in `NUMBER(1)` columns and must be bound
+/// as the integers `0`/`1` — a native `bool` bind would map to `OracleType::Boolean`
+/// (PL/SQL only) and be rejected against `NUMBER(1)`. Per-subject (unique subject),
+/// so it needs no `#[serial]`. Backend-agnostic: also exercises the Postgres path.
+#[tokio::test]
+async fn subject_normalize_flag_round_trips_true_and_false() {
+    let storage = common::storage().await;
+    let subject = format!("bool-roundtrip-{}", uuid::Uuid::new_v4());
+
+    // normalize = true → stored as NUMBER(1) 1, read back as true.
+    storage
+        .set_subject_level(&subject, "BACKWARD", true)
         .await
         .unwrap();
+    assert_eq!(
+        storage.get_subject_normalize(&subject).await.unwrap(),
+        Some(true),
+        "normalize=true must round-trip"
+    );
+
+    // normalize = false → stored as NUMBER(1) 0, read back as false.
+    storage
+        .set_subject_level(&subject, "FULL", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_subject_normalize(&subject).await.unwrap(),
+        Some(false),
+        "normalize=false must round-trip"
+    );
 }

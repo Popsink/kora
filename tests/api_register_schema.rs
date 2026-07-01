@@ -21,6 +21,9 @@ async fn register_schema_without_type_defaults_to_avro() {
 async fn register_schema_creates_subject_implicitly() {
     let base = common::spawn_server().await;
     let client = reqwest::Client::new();
+    if common::backend_is_oracle() {
+        return; // remaining assertions query PostgreSQL internals directly
+    }
     let pool = common::pool().await;
     let subject = format!("implicit-{}", uuid::Uuid::new_v4());
 
@@ -165,6 +168,9 @@ async fn register_with_subject_config_normalize_deduplicates() {
 async fn register_avro_schema_valid_succeeds() {
     let base = common::spawn_server().await;
     let client = reqwest::Client::new();
+    if common::backend_is_oracle() {
+        return; // remaining assertions query PostgreSQL internals directly
+    }
     let pool = common::pool().await;
     let subject = format!("valid-{}", uuid::Uuid::new_v4());
 
@@ -210,6 +216,9 @@ async fn register_avro_schema_valid_succeeds() {
 async fn register_avro_schema_idempotent_returns_same_id() {
     let base = common::spawn_server().await;
     let client = reqwest::Client::new();
+    if common::backend_is_oracle() {
+        return; // remaining assertions query PostgreSQL internals directly
+    }
     let pool = common::pool().await;
     let subject = format!("idempotent-{}", uuid::Uuid::new_v4());
 
@@ -1029,4 +1038,66 @@ async fn register_with_python_style_normalize_false() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// A schema larger than 32 KB must round-trip intact. This guards the Oracle
+/// CLOB write path: `schema_text` / `canonical_form` are CLOB columns and must be
+/// bound explicitly as CLOB. A small schema would pass even if the bind regressed
+/// to `NVARCHAR2`, so this deliberately exceeds Oracle's ~32 KB string-bind ceiling
+/// (ORA-01461 / ORA-22835). Backend-agnostic: also exercises the Postgres path.
+#[tokio::test]
+async fn register_large_schema_over_32kb_round_trips() {
+    let base = common::spawn_server().await;
+    let client = reqwest::Client::new();
+    let subject = format!("large-clob-{}", uuid::Uuid::new_v4());
+
+    // Build a valid Avro record with enough optional fields to exceed 32 KB.
+    let fields: Vec<serde_json::Value> = (0..1200)
+        .map(|n| {
+            serde_json::json!({
+                "name": format!("field_{n}"),
+                "type": ["null", "string"],
+                "default": null,
+            })
+        })
+        .collect();
+    let schema = serde_json::json!({
+        "type": "record",
+        "name": "LargeRecord",
+        "fields": fields,
+    })
+    .to_string();
+    assert!(
+        schema.len() > 32 * 1024,
+        "test schema must exceed 32 KB, was {} bytes",
+        schema.len()
+    );
+
+    let resp = client
+        .post(format!("{base}/subjects/{subject}/versions"))
+        .json(&serde_json::json!({"schema": schema}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "registering a >32 KB schema should succeed"
+    );
+
+    // Read it back and assert the full text survived the CLOB round-trip.
+    let got = common::api::get_schema_by_version(&client, &base, &subject, "1").await;
+    assert_eq!(got.status(), StatusCode::OK);
+    let body: serde_json::Value = got.json().await.unwrap();
+    let returned = body["schema"].as_str().expect("schema field present");
+
+    // Both sides are Avro JSON; compare structurally so whitespace/key-order
+    // differences don't cause a false failure. The field count is the load-bearing
+    // assertion (proves no truncation).
+    let returned_val: serde_json::Value = serde_json::from_str(returned).unwrap();
+    assert_eq!(
+        returned_val["fields"].as_array().map(Vec::len),
+        Some(1200),
+        "all 1200 fields must round-trip (no CLOB truncation)"
+    );
 }

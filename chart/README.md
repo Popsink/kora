@@ -6,7 +6,7 @@
 
 - Kubernetes 1.24+
 - Helm 3.8+
-- An existing PostgreSQL database
+- An existing PostgreSQL or Oracle database
 
 ## Quick Start
 
@@ -134,10 +134,11 @@ resources:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `database.host` | `""` | PostgreSQL host (plain) |
-| `database.port` | `5432` | PostgreSQL port (plain) |
-| `database.user` | `kora` | PostgreSQL user (plain) |
-| `database.database` | `kora` | PostgreSQL database name (plain) |
+| `database.backend` | `postgres` | Backing store engine: `postgres` or `oracle` (Oracle needs an Oracle-enabled image) (plain) |
+| `database.host` | `""` | Database host (plain) |
+| `database.port` | `5432` | Database port — PostgreSQL `5432`, Oracle `1521` (plain) |
+| `database.user` | `kora` | Database user (plain) |
+| `database.database` | `kora` | Database name (PostgreSQL) or service name (Oracle, e.g. `FREEPDB1`) (plain) |
 | `database.password` | `""` | Direct password (component mode; goes into the auto-Secret) |
 | `database.url` | `""` | Direct DATABASE_URL (URL mode; goes into the auto-Secret) |
 | `database.existingSecret` | `""` | Existing Secret holding the password or the URL |
