@@ -17,6 +17,12 @@ on:
     workflows: ["CI"]
     branches: [main]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without v prefix, e.g. 1.2.3)"
+        required: true
+        type: string
 
 concurrency:
   group: release
@@ -31,7 +37,7 @@ jobs:
     name: release-plz
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: write
       pull-requests: write
@@ -67,7 +73,9 @@ jobs:
   build:
     name: Build (${{ matrix.variant }}, ${{ matrix.platform_pair }})
     needs: release-plz
-    if: needs.release-plz.outputs.releases_created == 'true'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.release-plz.outputs.releases_created == 'true'
     permissions:
       packages: write
     strategy:
@@ -142,7 +150,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [release-plz, build]
-    if: needs.release-plz.outputs.releases_created == 'true' && needs.build.result == 'success'
+    if: >-
+      needs.build.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' ||
+       needs.release-plz.outputs.releases_created == 'true')
     permissions:
       packages: write
     strategy:
@@ -171,7 +182,7 @@ jobs:
 
       - name: Create and push multi-arch manifest
         env:
-          VERSION: ${{ needs.release-plz.outputs.version }}
+          VERSION: ${{ inputs.version || needs.release-plz.outputs.version }}
           VARIANT: ${{ matrix.variant }}
         working-directory: /tmp/digests
         run: |
@@ -185,7 +196,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [release-plz, merge]
-    if: needs.release-plz.outputs.releases_created == 'true' && needs.merge.result == 'success'
+    if: >-
+      needs.merge.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' ||
+       needs.release-plz.outputs.releases_created == 'true')
     permissions:
       packages: write
 
@@ -202,7 +216,7 @@ jobs:
 
       - name: Stamp chart version
         env:
-          VERSION: ${{ needs.release-plz.outputs.version }}
+          VERSION: ${{ inputs.version || needs.release-plz.outputs.version }}
         run: |
           sed -i "s|^version:.*|version: ${VERSION}|" chart/Chart.yaml
           sed -i "s|^appVersion:.*|appVersion: ${VERSION}|" chart/Chart.yaml
@@ -218,5 +232,5 @@ jobs:
 
       - name: Push chart to GHCR
         env:
-          VERSION: ${{ needs.release-plz.outputs.version }}
+          VERSION: ${{ inputs.version || needs.release-plz.outputs.version }}
         run: helm push "kora-${VERSION}.tgz" ${{ env.CHART }}
