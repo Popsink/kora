@@ -21,7 +21,7 @@ RUN mkdir -p /image && \
     cp target/$(xx-cargo --print-target-triple)/release/kora /image/kora
 
 # -- Runtime: Alpine + tini --
-FROM alpine:3.23
+FROM alpine:3.24
 
 LABEL org.opencontainers.image.source="https://github.com/Popsink/Kora" \
       org.opencontainers.image.description="Kora — Confluent-compatible Schema Registry" \
