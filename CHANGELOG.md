@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Popsink/kora/compare/v0.3.3...v0.4.0) - 2026-07-01
+
+### Added
+
+- support Oracle as an alternative backing store ([#56](https://github.com/Popsink/kora/pull/56))
+- configurable default global compatibility level (env + Helm) ([#51](https://github.com/Popsink/kora/pull/51))
+- *(migration)* add Karapace → Kora migration tooling ([#50](https://github.com/Popsink/kora/pull/50))
+
+### Other
+
+- *(deps)* bump the rust-minor-patch group with 2 updates ([#54](https://github.com/Popsink/kora/pull/54))
+- *(deps)* bump actions/checkout from 6 to 7 in the actions-all group ([#52](https://github.com/Popsink/kora/pull/52))
+- *(deps)* bump tower-http from 0.6.11 to 0.7.0 ([#55](https://github.com/Popsink/kora/pull/55))
+- *(deps)* bump sqlx from 0.8.6 to 0.9.0 ([#43](https://github.com/Popsink/kora/pull/43))
+- *(deps)* bump the rust-minor-patch group across 1 directory with 3 updates ([#49](https://github.com/Popsink/kora/pull/49))
+- Kotatsu integration e2e catalogue + first execution results (3 issues filed) ([#48](https://github.com/Popsink/kora/pull/48))
+- E2e test catalogue — pivot to the live Kora ↔ Kotatsu integration ([#45](https://github.com/Popsink/kora/pull/45))
+
 ## [0.3.3](https://github.com/Popsink/kora/compare/v0.3.2...v0.3.3) - 2026-06-01
 
 ### Other
