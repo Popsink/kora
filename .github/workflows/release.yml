@@ -86,7 +86,7 @@ jobs:
             dockerfile: dockerfiles/postgres.Dockerfile
             platform: linux/amd64
             platform_pair: linux-amd64
-            runner: ubuntu-latest
+            runner: ubuntu-latest-8-cores
           - variant: postgres
             dockerfile: dockerfiles/postgres.Dockerfile
             platform: linux/arm64
@@ -96,7 +96,7 @@ jobs:
             dockerfile: dockerfiles/oracle.Dockerfile
             platform: linux/amd64
             platform_pair: linux-amd64
-            runner: ubuntu-latest
+            runner: ubuntu-latest-8-cores
           - variant: oracle
             dockerfile: dockerfiles/oracle.Dockerfile
             platform: linux/arm64
