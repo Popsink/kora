@@ -6,19 +6,20 @@ edition = "2024"
 [features]
 default = []
 # Compile the Oracle backing-store driver (`oracle://` / DB_BACKEND=oracle).
-# Off by default so the standard build stays minimal. The driver is the pure-Rust
-# `oracle-rs` (no OCI/ODPI-C, no Oracle Instant Client) — an Oracle-enabled build
-# is still a single self-contained binary that connects over TCP, same as Postgres.
-oracle = ["dep:oracle-rs", "dep:deadpool"]
+# Off by default so the standard build stays minimal. Uses the mature `oracle`
+# crate (ODPI-C). An Oracle-enabled build is a glibc binary that loads Oracle
+# Instant Client at runtime — NOT the static-musl single binary of the default
+# Postgres build (see dockerfiles/oracle.Dockerfile). The driver is blocking; DB calls are
+# bridged onto tokio via spawn_blocking.
+oracle = ["dep:oracle"]
 
 [dependencies]
 apache-avro = "0.21.0"
 async-trait = "0.1.83"
 axum = { version = "0.8.9", features = ["macros"] }
-deadpool = { version = "0.12.3", optional = true, features = ["rt_tokio_1"] }
 figment = { version = "0.10.19", features = ["env"] }
 hex = "0.4"
-oracle-rs = { version = "0.1.7", optional = true }
+oracle = { version = "0.6.3", optional = true }
 jsonschema = { version = "0.46.5", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"

@@ -107,15 +107,20 @@ pub async fn pool() -> sqlx::PgPool {
 /// Build the configured storage backend (Postgres or Oracle). Backend-agnostic —
 /// used by the black-box HTTP tests.
 ///
-/// Migrations run **once per test process** (guarded by [`MIGRATED`]): the schema
-/// is shared, and cargo runs test binaries sequentially, so this avoids dozens of
-/// concurrent `migrate()` calls hammering the database (which exhausts Oracle's
-/// session limit and trips concurrent-DDL contention).
+/// Each test gets its **own** pool: every `#[tokio::test]` runs on its own tokio
+/// runtime, and a `sqlx` pool is bound to the runtime that created it — sharing one
+/// pool across tests breaks once the creating test's runtime is dropped. A per-test
+/// pool sidesteps that for both backends. Migrations run **once per process**
+/// (guarded by [`MIGRATED`]): the schema is shared and cargo runs test binaries
+/// sequentially, so this avoids dozens of concurrent `migrate()` calls.
+///
+/// Oracle's thick driver serialises session-pool *creation* internally (see
+/// `OracleStorage::connect`), so many per-test pools no longer race on
+/// `OCISessionPoolCreate` (`ORA-24416`).
 pub async fn storage() -> kora::storage::DynStorage {
     let mut cfg = kora::config::KoraConfig::load().expect("config should load from env");
     // Each test spawns its own server (and pool); keep pools small so the parallel
-    // suite does not exhaust the database's connection limit. Honour a smaller
-    // configured value (the Oracle CI job sets DB_POOL_MAX=2).
+    // suite does not exhaust the database's connection limit.
     cfg.db_pool_max = cfg.db_pool_max.min(5);
     let store = kora::storage::connect(&cfg)
         .await

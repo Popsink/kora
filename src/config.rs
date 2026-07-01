@@ -76,19 +76,6 @@ pub struct KoraConfig {
     /// Maximum number of database connections in the pool.
     #[serde(default = "default_db_pool_max")]
     pub db_pool_max: u32,
-    /// Oracle only: retire a pooled connection after it has executed this many
-    /// statements. The `oracle-rs` driver never closes server-side cursors, so a
-    /// connection must be recycled before it reaches Oracle's `open_cursors`
-    /// limit. Retirement is checked at checkout, so a single request can still
-    /// burst statements on a borrowed connection (a paginated listing or a
-    /// transitive-compatibility scan over a long version history); the invariant
-    /// is `this + worst-case single-request burst < open_cursors`. Sizing is a
-    /// balance: too high overflows `open_cursors`, too low churns reconnections.
-    /// The default (200) suits a generous `open_cursors` (≥ ~1000, as production
-    /// databases are configured); raise it further when `open_cursors` is higher
-    /// to reduce reconnects. Ignored by the `PostgreSQL` backend.
-    #[serde(default = "default_oracle_max_queries_per_conn")]
-    pub oracle_max_queries_per_conn: usize,
     /// Default global schema compatibility level. When set, it is reconciled into
     /// the global config row (`subject IS NULL`) on every startup — the declared
     /// default is the source of truth, overwriting any runtime `PUT`/`DELETE
@@ -115,7 +102,6 @@ impl Default for KoraConfig {
             port: default_port(),
             max_body_size: default_max_body_size(),
             db_pool_max: default_db_pool_max(),
-            oracle_max_queries_per_conn: default_oracle_max_queries_per_conn(),
             default_compatibility: None,
         }
     }
@@ -126,7 +112,7 @@ impl KoraConfig {
     ///
     /// Recognized env vars: `DB_BACKEND`, `DATABASE_URL`, `DB_HOST`, `DB_PORT`,
     /// `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `HOST`, `PORT`, `MAX_BODY_SIZE`,
-    /// `DB_POOL_MAX`, `ORACLE_MAX_QUERIES_PER_CONN`, `DEFAULT_COMPATIBILITY`.
+    /// `DB_POOL_MAX`, `DEFAULT_COMPATIBILITY`.
     ///
     /// The backend is taken from `DB_BACKEND` if set, otherwise inferred from the
     /// `database_url` scheme (`oracle://` → Oracle), defaulting to `Postgres`.
@@ -154,7 +140,6 @@ impl KoraConfig {
                 "PORT",
                 "MAX_BODY_SIZE",
                 "DB_POOL_MAX",
-                "ORACLE_MAX_QUERIES_PER_CONN",
             ]))
             .extract()
             .map_err(Box::new)?;
@@ -335,8 +320,4 @@ fn default_max_body_size() -> usize {
 
 fn default_db_pool_max() -> u32 {
     20
-}
-
-fn default_oracle_max_queries_per_conn() -> usize {
-    200
 }

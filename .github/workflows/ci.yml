@@ -1,4 +1,9 @@
 # CI — split into focused jobs: lint, helm, postgres backend, oracle backend.
+#
+# The Rust jobs run inside the project's devbox environment (see devbox.json +
+# rust-toolchain.toml), so the toolchain (Rust 1.96.0) and the Oracle Instant
+# Client are the exact same pinned versions developers get locally — no ad-hoc
+# toolchain action or manual Instant Client download.
 
 name: CI
 
@@ -15,6 +20,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # oracle-instantclient is an unfree nixpkgs package; devbox must be allowed to
+  # evaluate it when materializing the environment.
+  NIXPKGS_ALLOW_UNFREE: "1"
 
 permissions:
   contents: read
@@ -23,33 +31,34 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install devbox
+        uses: jetify-com/devbox-install-action@v0.15.0
         with:
-          components: rustfmt, clippy
+          enable-cache: "true"
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Formatting
-        run: cargo fmt --check
+        run: devbox run -- cargo fmt --check
 
       - name: Clippy (default)
-        run: cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+        run: devbox run -- cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
 
-      # oracle-rs is pure Rust, so this is a plain compile — no Oracle client
-      # needed; the runtime path is exercised by the `oracle` job.
+      # The `oracle` crate vendors ODPI-C, compiled by gcc; no Instant Client is
+      # needed for a compile-only check. The runtime path is exercised by the
+      # `oracle` job.
       - name: Clippy (oracle feature)
-        run: cargo clippy --features oracle -- -D warnings -D clippy::all -D clippy::pedantic
+        run: devbox run -- cargo clippy --features oracle -- -D warnings -D clippy::all -D clippy::pedantic
 
   postgres:
     name: Postgres backend
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -72,13 +81,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install devbox
+        uses: jetify-com/devbox-install-action@v0.15.0
+        with:
+          enable-cache: "true"
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Integration suite against Postgres
-        run: cargo test --test '*' -- --include-ignored
+        run: devbox run -- cargo test --test '*' -- --include-ignored
 
       - name: Upload test logs on failure
         if: failure()
@@ -110,8 +121,9 @@ jobs:
           --health-start-period 90s
 
     env:
-      # The same Confluent-compatible integration suite, run against Oracle. No
-      # Oracle Instant Client is installed — the pure-Rust driver needs none.
+      # The same Confluent-compatible integration suite, run against Oracle. The
+      # `oracle` crate is a thick ODPI-C / OCI driver; the Oracle Instant Client
+      # comes from devbox (see devbox.json), which puts it on LD_LIBRARY_PATH.
       DATABASE_URL: ""
       DB_BACKEND: oracle
       DB_HOST: localhost
@@ -126,16 +138,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install devbox
+        uses: jetify-com/devbox-install-action@v0.15.0
+        with:
+          enable-cache: "true"
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Integration suite against Oracle
         # Oracle Free is capped at 2 CPU threads and shares this runner with the
         # test workload; keep concurrency low so concurrent connection creation
-        # doesn't overwhelm it (the pool also retries transient connect refusals).
-        run: cargo test --features oracle --test '*' -- --include-ignored --test-threads=2
+        # doesn't overwhelm it. devbox's init_hook puts the Instant Client on
+        # LD_LIBRARY_PATH for the driver to load.
+        run: devbox run -- cargo test --features oracle --test '*' -- --include-ignored --test-threads=2
 
       - name: Upload test logs on failure
         if: failure()

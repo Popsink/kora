@@ -11,6 +11,28 @@ ensure-pg:
       echo "Waiting for PG..."; until {{ pg_ready }}; do sleep 0.3; done; }
     @until {{ db_ready }}; do sleep 0.3; done
 
+# The `oracle` crate is a thick ODPI-C driver: the Oracle Instant Client must be
+# on the loader path at runtime. This project ships it via devbox (see devbox.json
+# + rust-toolchain.toml) — enter the env with `direnv allow` (auto) or `devbox run …`.
+# NOTE: on macOS, just execs recipes via /usr/bin/env, which SIP-strips DYLD_* — so
+# the value exported by devbox's init_hook is gone here. We rebuild the loader path
+# from DEVBOX_PACKAGES_DIR (a plain var, which survives) in `ic-loader-path`.
+ic-loader-path := if env('DEVBOX_PACKAGES_DIR', '') != '' { env('DEVBOX_PACKAGES_DIR') + "/lib" } else { '' }
+
+[private]
+check-instantclient:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IFS=':' read -ra dirs <<< "{{ ic-loader-path }}:${DYLD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
+    for d in "${dirs[@]}"; do
+      [ -n "$d" ] && ls "$d"/libclntsh.* >/dev/null 2>&1 && exit 0
+    done
+    echo "Oracle Instant Client not on the loader path (the 'oracle' backend can't load its driver)." >&2
+    echo "This project provides it via devbox. Enter the env, then re-run:" >&2
+    echo "  direnv allow                    # if you use direnv (auto-activates on cd)" >&2
+    echo "  devbox run just test oracle     # otherwise, run through devbox" >&2
+    exit 1
+
 # ---------- Quality ----------
 
 # Check formatting
@@ -58,15 +80,19 @@ test db="postgres":
         cargo test --test '*' -- --include-ignored
         ;;
       oracle)
-        # Pure-Rust oracle-rs driver — no Oracle client needed. Start a clean
-        # Oracle Free (down -v first so a stale/half-booted instance can't trip
-        # ORA-00600 ksipc), and tear it down on exit. Shares port 1521 with the
-        # loadtest Oracle — stop that first (`just loadtest-stop`).
+        just check-instantclient   # fail fast (before the slow Oracle boot) if IC isn't on the loader path
+        # Start a clean Oracle Free (down -v first so a stale/half-booted instance
+        # can't trip ORA-00600 ksipc), and tear it down on exit. Shares port 1521
+        # with the loadtest Oracle — stop that first (`just loadtest-stop`).
         docker compose --profile oracle down -v >/dev/null 2>&1 || true
         docker compose --profile oracle up -d oracle
         echo "Waiting for Oracle (first boot is slow)..."
         until docker compose exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
         trap 'docker compose --profile oracle down -v' EXIT
+        # Put the devbox-provided Instant Client on the loader path (see note on
+        # check-instantclient re: SIP stripping DYLD_* from the recipe env).
+        export DYLD_LIBRARY_PATH="{{ ic-loader-path }}:${DYLD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="{{ ic-loader-path }}:${LD_LIBRARY_PATH:-}"
         DB_BACKEND=oracle DB_HOST=localhost DB_PORT="${ORACLE_PORT:-1521}" \
           DB_USER="${DB_USER:-kora}" DB_PASSWORD="${DB_PASSWORD:-kora}" DB_NAME=FREEPDB1 \
           DATABASE_URL= DB_POOL_MAX="${DB_POOL_MAX:-2}" \
@@ -84,10 +110,16 @@ ci: fmt lint test
 
 # ---------- Build & Push ----------
 
-# Build + push image (amd64 + arm64)
+# Build + push the PostgreSQL image (static musl, amd64 + arm64)
 [group('build')]
-build tag="latest":
-    docker buildx build --platform {{ platforms }} --provenance=false -t {{ image }}:{{ tag }} --push .
+build tag="latest-postgres":
+    docker buildx build --platform {{ platforms }} --provenance=false -f dockerfiles/postgres.Dockerfile -t {{ image }}:{{ tag }} --push .
+
+# Build + push the Oracle image (glibc + Instant Client), multi-arch. For a quick
+# LOCAL build use: docker build -f dockerfiles/oracle.Dockerfile -t kora:oracle .
+[group('build')]
+build-oracle tag="latest-oracle":
+    docker buildx build --platform {{ platforms }} --provenance=false -f dockerfiles/oracle.Dockerfile -t {{ image }}:{{ tag }} --push .
 
 # ---------- Load testing ----------
 
@@ -108,14 +140,7 @@ ensure-loadtest-oracle:
     {{ loadtest_pg }} --profile oracle up -d oracle
     echo "Waiting for load test Oracle to become healthy (each run boots a fresh DB — can take 2-4 min; do not interrupt)..."
     until {{ loadtest_pg }} exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
-    # Raise open_cursors to a production-like value (a stock gvenzl image defaults
-    # to 300). The pure-Rust driver leaks a server cursor per statement, so Kora
-    # retires a connection before ORACLE_MAX_QUERIES_PER_CONN; a generous
-    # open_cursors keeps retirement infrequent and ensures no single request's
-    # statement burst reaches the limit — exactly how a production DB is sized.
-    echo "ALTER SYSTEM SET open_cursors=1000;" \
-      | {{ loadtest_pg }} exec -T oracle sqlplus -s system/oracle@localhost:1521/FREEPDB1
-    echo "Oracle ready (open_cursors=1000)."
+    echo "Oracle ready."
 
 # Run a k6 scenario against `backend` (postgres|oracle): starts the DB + Kora, tears down after
 [private]
@@ -131,7 +156,10 @@ loadtest-run scenario backend="postgres" *k6args:
         export DATABASE_URL="{{ loadtest_db }}"
         ;;
       oracle)
+        just check-instantclient   # Kora runs natively here too → needs IC on the loader path
         just ensure-loadtest-oracle
+        export DYLD_LIBRARY_PATH="{{ ic-loader-path }}:${DYLD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="{{ ic-loader-path }}:${LD_LIBRARY_PATH:-}"
         cargo build --quiet --features oracle
         export DB_BACKEND=oracle DB_HOST=localhost DB_PORT=1521 \
           DB_USER=kora DB_PASSWORD=kora DB_NAME=FREEPDB1 DATABASE_URL=""
@@ -233,7 +261,7 @@ migrate-verify:
 # Run image locally (needs DATABASE_URL)
 [group('docker')]
 run db_url:
-    docker run --rm --network host --name kora -e "DATABASE_URL={{ db_url }}" {{ image }}:latest
+    docker run --rm --network host --name kora -e "DATABASE_URL={{ db_url }}" {{ image }}:latest-postgres
 
 # Stop Kora and compose services
 [group('docker')]
@@ -245,5 +273,5 @@ stop:
 [group('docker')]
 clean:
     -docker rm -f kora
-    -docker rmi {{ image }}:latest
+    -docker rmi {{ image }}:latest-postgres
     -docker compose down -v

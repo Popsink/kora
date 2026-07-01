@@ -1,69 +1,46 @@
 //! Oracle SQL for the schema-domain `Storage` operations, including the
 //! transactional schema-registration path and the CLOB-aware finders/listings.
 
-use super::pool::CountedConn;
+use oracle::{Connection, Row};
 
-use crate::binds;
 use crate::error::KoraError;
-use crate::storage::sql::helpers::scalar_bool;
-use crate::storage::sql::helpers::scalar_opt_i64;
-use crate::storage::sql::{Row as SqlRow, SqlExecutor};
 use crate::storage::types::{CompatCheck, NewSchema, SchemaVersion, SubjectVersion};
 use crate::types::SchemaReference;
 
-use super::OracleStorage;
 use super::driver::{
-    SV_COLS, SV_COLS_META, SV_JOIN, cell_i32, cell_i64, collect_svs, i, is_unique_violation,
-    like_pattern, query_all, row_to_sv, s, val_i64,
+    OraBind, SV_COLS, SV_JOIN, append_window, b, clob, commit_or_rollback, first_row, i,
+    is_unique_violation, like_pattern, map_ora, s, scalar_bool, scalar_opt, to_refs,
 };
 
-pub(super) async fn register_schema_atomically(
-    store: &OracleStorage,
+pub(super) fn register_schema_atomically(
+    conn: &Connection,
     subject_name: &str,
     schema: &NewSchema<'_>,
     refs: &[SchemaReference],
     normalize: bool,
-    compat: Option<CompatCheck>,
+    compat: Option<&CompatCheck>,
 ) -> Result<(i64, i32, bool), KoraError> {
-    // `oracle-rs` binds CLOB values (schema_text / canonical_form) through a
-    // temporary LOB, which Oracle intermittently rejects under concurrency
-    // ("server rejected … temporary LOB"), closing the connection. Registration
-    // is idempotent (content/version dedup), so retry the whole operation on a
-    // fresh connection for that transient class of error.
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        let conn = store.conn().await?;
-        match register_once(&conn, subject_name, schema, refs, normalize, compat.clone()).await {
-            Ok(v) => return Ok(v),
-            // Transient connection-level failure: loop and retry on a fresh connection.
-            Err(e) if attempt < 4 && is_transient(&e) => {}
-            Err(e) => return Err(e),
-        }
-    }
+    let r = register_once(conn, subject_name, schema, refs, normalize, compat);
+    commit_or_rollback(conn, r)
 }
 
-pub(super) async fn find_all_active_versions(
-    store: &OracleStorage,
+pub(super) fn find_all_active_versions(
+    conn: &Connection,
     subject: &str,
 ) -> Result<Vec<SchemaVersion>, KoraError> {
-    let conn = store.conn().await?;
-    let result = query_all(
-        &conn,
+    let binds = [s(subject)];
+    collect_svs(
+        conn,
         &format!(
-            "SELECT {SV_COLS_META} {SV_JOIN} \
+            "SELECT {SV_COLS} {SV_JOIN} \
              WHERE sub.name = :1 AND sv.deleted = 0 ORDER BY sv.version"
         ),
-        &[s(subject)],
-        0,
-        -1,
+        &binds,
     )
-    .await?;
-    collect_svs(&conn, &result).await
 }
 
-pub(super) async fn find_schema_by_subject_version(
-    store: &OracleStorage,
+pub(super) fn find_schema_by_subject_version(
+    conn: &Connection,
     subject: &str,
     version: i32,
     include_deleted: bool,
@@ -73,24 +50,25 @@ pub(super) async fn find_schema_by_subject_version(
     } else {
         " AND sv.deleted = 0"
     };
-    let conn = store.conn().await?;
-    let result = conn
-        .query(
-            &format!(
-                "SELECT {SV_COLS} {SV_JOIN} \
-                 WHERE sub.name = :1 AND sv.version = :2{filter}"
-            ),
-            &[s(subject), i(i64::from(version))],
-        )
-        .await?;
-    match result.first() {
-        Some(row) => Ok(Some(row_to_sv(&conn, row).await?)),
-        None => Ok(None),
-    }
+    let binds = [s(subject), i(i64::from(version))];
+    let refs = to_refs(&binds);
+    conn.query(
+        &format!(
+            "SELECT {SV_COLS} {SV_JOIN} \
+             WHERE sub.name = :1 AND sv.version = :2{filter}"
+        ),
+        &refs,
+    )
+    .map_err(map_ora)?
+    .next()
+    .transpose()
+    .map_err(map_ora)?
+    .map(|row| row_to_sv(&row))
+    .transpose()
 }
 
-pub(super) async fn find_latest_schema_by_subject(
-    store: &OracleStorage,
+pub(super) fn find_latest_schema_by_subject(
+    conn: &Connection,
     subject: &str,
     include_deleted: bool,
 ) -> Result<Option<SchemaVersion>, KoraError> {
@@ -99,24 +77,25 @@ pub(super) async fn find_latest_schema_by_subject(
     } else {
         " AND sv.deleted = 0"
     };
-    let conn = store.conn().await?;
-    let result = conn
-        .query(
-            &format!(
-                "SELECT {SV_COLS} {SV_JOIN} \
-                 WHERE sub.name = :1{filter} ORDER BY sv.version DESC FETCH FIRST 1 ROW ONLY"
-            ),
-            &[s(subject)],
-        )
-        .await?;
-    match result.first() {
-        Some(row) => Ok(Some(row_to_sv(&conn, row).await?)),
-        None => Ok(None),
-    }
+    let binds = [s(subject)];
+    let refs = to_refs(&binds);
+    conn.query(
+        &format!(
+            "SELECT {SV_COLS} {SV_JOIN} \
+             WHERE sub.name = :1{filter} ORDER BY sv.version DESC FETCH FIRST 1 ROW ONLY"
+        ),
+        &refs,
+    )
+    .map_err(map_ora)?
+    .next()
+    .transpose()
+    .map_err(map_ora)?
+    .map(|row| row_to_sv(&row))
+    .transpose()
 }
 
-pub(super) async fn find_schema_by_subject_id_and_fingerprint(
-    store: &OracleStorage,
+pub(super) fn find_schema_by_subject_id_and_fingerprint(
+    conn: &Connection,
     subject_id: i64,
     fingerprint: &str,
     normalize: bool,
@@ -132,105 +111,104 @@ pub(super) async fn find_schema_by_subject_id_and_fingerprint(
     } else {
         " AND sv.deleted = 0"
     };
-    let conn = store.conn().await?;
-    let result = conn
-        .query(
-            &format!(
-                "SELECT {SV_COLS} {SV_JOIN} \
-                 WHERE sv.subject_id = :1 AND sc.{fp_col} = :2{filter}"
-            ),
-            &[i(subject_id), s(fingerprint)],
-        )
-        .await?;
-    match result.first() {
-        Some(row) => Ok(Some(row_to_sv(&conn, row).await?)),
-        None => Ok(None),
-    }
+    let binds = [i(subject_id), s(fingerprint)];
+    let refs = to_refs(&binds);
+    conn.query(
+        &format!(
+            "SELECT {SV_COLS} {SV_JOIN} \
+             WHERE sv.subject_id = :1 AND sc.{fp_col} = :2{filter}"
+        ),
+        &refs,
+    )
+    .map_err(map_ora)?
+    .next()
+    .transpose()
+    .map_err(map_ora)?
+    .map(|row| row_to_sv(&row))
+    .transpose()
 }
 
-pub(super) async fn find_schema_by_id(
-    store: &OracleStorage,
+pub(super) fn find_schema_by_id(
+    conn: &Connection,
     id: i64,
 ) -> Result<Option<(String, String)>, KoraError> {
-    let conn = store.conn().await?;
-    let result = conn
-        .query(
-            "SELECT schema_text, schema_type FROM schema_contents WHERE id = :1",
-            &[i(id)],
-        )
-        .await?;
-    match result.first() {
-        Some(row) => {
-            let text = super::driver::cell_text(&conn, row.get(0)).await?;
-            let kind = super::driver::cell_text(&conn, row.get(1)).await?;
-            Ok(Some((text, kind)))
-        }
-        None => Ok(None),
-    }
+    let binds = [i(id)];
+    let refs = to_refs(&binds);
+    conn.query(
+        "SELECT schema_text, schema_type FROM schema_contents WHERE id = :1",
+        &refs,
+    )
+    .map_err(map_ora)?
+    .next()
+    .transpose()
+    .map_err(map_ora)?
+    .map(|row| -> Result<(String, String), KoraError> {
+        let text = row.get::<usize, String>(0).map_err(map_ora)?;
+        let kind = row.get::<usize, String>(1).map_err(map_ora)?;
+        Ok((text, kind))
+    })
+    .transpose()
 }
 
-pub(super) async fn find_max_schema_id(store: &OracleStorage) -> Result<i64, KoraError> {
+pub(super) fn find_max_schema_id(conn: &Connection) -> Result<i64, KoraError> {
+    // `MAX(id)` always returns a row, but its value is NULL on an empty table.
     Ok(
-        scalar_opt_i64(store, "SELECT MAX(id) FROM schema_contents", &[])
-            .await?
+        scalar_opt::<Option<i64>>(conn, "SELECT MAX(id) FROM schema_contents", &[])?
+            .flatten()
             .unwrap_or(0),
     )
 }
 
-pub(super) async fn schema_exists(store: &OracleStorage, id: i64) -> Result<bool, KoraError> {
+pub(super) fn schema_exists(conn: &Connection, id: i64) -> Result<bool, KoraError> {
     scalar_bool(
-        store,
+        conn,
         "SELECT CASE WHEN EXISTS \
          (SELECT 1 FROM schema_contents WHERE id = :1) THEN 1 ELSE 0 END FROM dual",
-        &binds![id],
+        &[i(id)],
     )
-    .await
 }
 
-pub(super) async fn find_subjects_by_schema_id(
-    store: &OracleStorage,
+pub(super) fn find_subjects_by_schema_id(
+    conn: &Connection,
     id: i64,
     include_deleted: bool,
     subject_filter: Option<&str>,
     offset: i64,
     limit: i64,
 ) -> Result<Vec<String>, KoraError> {
-    // The driver binds `:N` positionally by occurrence, so each placeholder
-    // consumes one param; the `include_deleted` flag appears twice and is
-    // therefore passed twice (`:2` and `:3`), in SQL appearance order.
-    if let Some(filter) = subject_filter {
-        let sql = "SELECT DISTINCT sub.name FROM schema_versions sv \
+    // The `include_deleted` flag appears twice (`:2` and `:3`); each placeholder
+    // consumes one param, in SQL appearance order.
+    let (base_sql, binds): (&str, Vec<OraBind>) = if let Some(filter) = subject_filter {
+        (
+            "SELECT DISTINCT sub.name FROM schema_versions sv \
              JOIN subjects sub ON sv.subject_id = sub.id \
              WHERE sv.content_id = :1 AND (sv.deleted = 0 OR :2 = 1) \
                AND (sub.deleted = 0 OR :3 = 1) AND sub.name = :4 \
-             ORDER BY sub.name";
-        crate::storage::sql::helpers::fetch_strings(
-            store,
-            sql,
-            &binds![id, include_deleted, include_deleted, filter],
-            offset,
-            limit,
+             ORDER BY sub.name",
+            vec![i(id), b(include_deleted), b(include_deleted), s(filter)],
         )
-        .await
     } else {
-        let sql = "SELECT DISTINCT sub.name FROM schema_versions sv \
+        (
+            "SELECT DISTINCT sub.name FROM schema_versions sv \
              JOIN subjects sub ON sv.subject_id = sub.id \
              WHERE sv.content_id = :1 AND (sv.deleted = 0 OR :2 = 1) \
                AND (sub.deleted = 0 OR :3 = 1) \
-             ORDER BY sub.name";
-        crate::storage::sql::helpers::fetch_strings(
-            store,
-            sql,
-            &binds![id, include_deleted, include_deleted],
-            offset,
-            limit,
+             ORDER BY sub.name",
+            vec![i(id), b(include_deleted), b(include_deleted)],
         )
-        .await
+    };
+    let sql = append_window(base_sql, offset, limit);
+    let refs = to_refs(&binds);
+    let mut out = Vec::new();
+    for row in conn.query(&sql, &refs).map_err(map_ora)? {
+        let row = row.map_err(map_ora)?;
+        out.push(row.get::<usize, String>(0).map_err(map_ora)?);
     }
+    Ok(out)
 }
 
-pub(super) async fn find_versions_by_schema_id(
-    store: &OracleStorage,
+pub(super) fn find_versions_by_schema_id(
+    conn: &Connection,
     id: i64,
     include_deleted: bool,
     subject_filter: Option<&str>,
@@ -238,47 +216,40 @@ pub(super) async fn find_versions_by_schema_id(
     limit: i64,
 ) -> Result<Vec<SubjectVersion>, KoraError> {
     // `include_deleted` appears twice (`:2`, `:3`) — one param per occurrence.
-    let rows = if let Some(filter) = subject_filter {
-        let sql = "SELECT sub.name, sv.version FROM schema_versions sv \
+    let (base_sql, binds): (&str, Vec<OraBind>) = if let Some(filter) = subject_filter {
+        (
+            "SELECT sub.name, sv.version FROM schema_versions sv \
              JOIN subjects sub ON sv.subject_id = sub.id \
              WHERE sv.content_id = :1 AND (sv.deleted = 0 OR :2 = 1) \
                AND (sub.deleted = 0 OR :3 = 1) AND sub.name = :4 \
-             ORDER BY sub.name, sv.version";
-        store
-            .fetch_all_paged(
-                sql,
-                &binds![id, include_deleted, include_deleted, filter],
-                offset,
-                limit,
-            )
-            .await?
+             ORDER BY sub.name, sv.version",
+            vec![i(id), b(include_deleted), b(include_deleted), s(filter)],
+        )
     } else {
-        let sql = "SELECT sub.name, sv.version FROM schema_versions sv \
+        (
+            "SELECT sub.name, sv.version FROM schema_versions sv \
              JOIN subjects sub ON sv.subject_id = sub.id \
              WHERE sv.content_id = :1 AND (sv.deleted = 0 OR :2 = 1) \
                AND (sub.deleted = 0 OR :3 = 1) \
-             ORDER BY sub.name, sv.version";
-        store
-            .fetch_all_paged(
-                sql,
-                &binds![id, include_deleted, include_deleted],
-                offset,
-                limit,
-            )
-            .await?
+             ORDER BY sub.name, sv.version",
+            vec![i(id), b(include_deleted), b(include_deleted)],
+        )
     };
-    rows.iter()
-        .map(|r| {
-            Ok(SubjectVersion {
-                subject: r.get_str(0)?,
-                version: r.get_i32(1)?,
-            })
-        })
-        .collect()
+    let sql = append_window(base_sql, offset, limit);
+    let refs = to_refs(&binds);
+    let mut out = Vec::new();
+    for row in conn.query(&sql, &refs).map_err(map_ora)? {
+        let row = row.map_err(map_ora)?;
+        out.push(SubjectVersion {
+            subject: row.get::<usize, String>(0).map_err(map_ora)?,
+            version: row.get::<usize, i32>(1).map_err(map_ora)?,
+        });
+    }
+    Ok(out)
 }
 
-pub(super) async fn list_schema_versions(
-    store: &OracleStorage,
+pub(super) fn list_schema_versions(
+    conn: &Connection,
     subject: &str,
     include_deleted: bool,
     deleted_only: bool,
@@ -286,41 +257,48 @@ pub(super) async fn list_schema_versions(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<i32>, KoraError> {
-    let rows = if deleted_only && deleted_as_negative {
-        let sql = "SELECT -sv.version FROM schema_versions sv \
+    let (base_sql, binds): (&str, Vec<OraBind>) = if deleted_only && deleted_as_negative {
+        (
+            "SELECT -sv.version FROM schema_versions sv \
              JOIN subjects sub ON sv.subject_id = sub.id \
-             WHERE sub.name = :1 AND sv.deleted = 1 ORDER BY sv.version";
-        store
-            .fetch_all_paged(sql, &binds![subject], offset, limit)
-            .await?
+             WHERE sub.name = :1 AND sv.deleted = 1 ORDER BY sv.version",
+            vec![s(subject)],
+        )
     } else if deleted_only {
-        let sql = "SELECT sv.version FROM schema_versions sv \
+        (
+            "SELECT sv.version FROM schema_versions sv \
              JOIN subjects sub ON sv.subject_id = sub.id \
-             WHERE sub.name = :1 AND sv.deleted = 1 ORDER BY sv.version";
-        store
-            .fetch_all_paged(sql, &binds![subject], offset, limit)
-            .await?
+             WHERE sub.name = :1 AND sv.deleted = 1 ORDER BY sv.version",
+            vec![s(subject)],
+        )
     } else if deleted_as_negative && include_deleted {
-        let sql = "SELECT CASE WHEN sv.deleted = 1 THEN -sv.version ELSE sv.version END \
+        (
+            "SELECT CASE WHEN sv.deleted = 1 THEN -sv.version ELSE sv.version END \
              FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id \
-             WHERE sub.name = :1 ORDER BY ABS(sv.version)";
-        store
-            .fetch_all_paged(sql, &binds![subject], offset, limit)
-            .await?
+             WHERE sub.name = :1 ORDER BY ABS(sv.version)",
+            vec![s(subject)],
+        )
     } else {
-        let sql = "SELECT sv.version FROM schema_versions sv \
+        (
+            "SELECT sv.version FROM schema_versions sv \
              JOIN subjects sub ON sv.subject_id = sub.id \
              WHERE sub.name = :1 AND (sv.deleted = 0 OR :2 = 1) \
-             ORDER BY sv.version";
-        store
-            .fetch_all_paged(sql, &binds![subject, include_deleted], offset, limit)
-            .await?
+             ORDER BY sv.version",
+            vec![s(subject), b(include_deleted)],
+        )
     };
-    rows.iter().map(|r| r.get_i32(0)).collect()
+    let sql = append_window(base_sql, offset, limit);
+    let refs = to_refs(&binds);
+    let mut out = Vec::new();
+    for row in conn.query(&sql, &refs).map_err(map_ora)? {
+        let row = row.map_err(map_ora)?;
+        out.push(row.get::<usize, i32>(0).map_err(map_ora)?);
+    }
+    Ok(out)
 }
 
-pub(super) async fn list_schemas(
-    store: &OracleStorage,
+pub(super) fn list_schemas(
+    conn: &Connection,
     include_deleted: bool,
     latest_only: bool,
     prefix: Option<&str>,
@@ -334,12 +312,12 @@ pub(super) async fn list_schemas(
     } else {
         ""
     };
-    let sql = if latest_only {
+    let base_sql = if latest_only {
         // DISTINCT ON (sub.name) → highest version per subject via ROW_NUMBER.
         format!(
-            "SELECT id, subject, version, schema_type FROM (\
+            "SELECT id, subject, version, schema_type, schema_text FROM (\
                 SELECT sc.id AS id, sub.name AS subject, sv.version AS version, \
-                       sc.schema_type AS schema_type, \
+                       sc.schema_type AS schema_type, sc.schema_text AS schema_text, \
                        ROW_NUMBER() OVER (PARTITION BY sub.name ORDER BY sv.version DESC) AS rn \
                 {SV_JOIN} \
                 WHERE (sv.deleted = 0 OR {incl} = 1) AND (sub.deleted = 0 OR {incl} = 1){like_sql}\
@@ -347,138 +325,160 @@ pub(super) async fn list_schemas(
         )
     } else {
         format!(
-            "SELECT {SV_COLS_META} {SV_JOIN} \
+            "SELECT {SV_COLS} {SV_JOIN} \
              WHERE (sv.deleted = 0 OR {incl} = 1) AND (sub.deleted = 0 OR {incl} = 1){like_sql} \
              ORDER BY sub.name, sv.version"
         )
     };
-    let params: Vec<oracle_rs::Value> = like.iter().map(|p| s(p)).collect();
-    let conn = store.conn().await?;
-    let result = query_all(&conn, &sql, &params, offset, limit).await?;
-    collect_svs(&conn, &result).await
+    let sql = append_window(&base_sql, offset, limit);
+    let binds: Vec<OraBind> = like.iter().map(|p| s(p)).collect();
+    let refs = to_refs(&binds);
+    let mut out = Vec::new();
+    for row in conn.query(&sql, &refs).map_err(map_ora)? {
+        out.push(row_to_sv(&row.map_err(map_ora)?)?);
+    }
+    Ok(out)
 }
 
-pub(super) async fn soft_delete_latest_schema(
-    store: &OracleStorage,
+pub(super) fn soft_delete_latest_schema(
+    conn: &Connection,
     subject: &str,
 ) -> Result<Option<i32>, KoraError> {
-    let conn = store.conn().await?;
-    let latest = conn
-        .query(
-            "SELECT sv.version FROM schema_versions sv \
-             JOIN subjects sub ON sv.subject_id = sub.id \
-             WHERE sub.name = :1 AND sv.deleted = 0 \
-             ORDER BY sv.version DESC FETCH FIRST 1 ROW ONLY",
-            &[s(subject)],
-        )
-        .await?;
-    let Some(version) = latest.first().map(|r| cell_i32(r, 0)).transpose()? else {
-        return Ok(None);
-    };
-    let updated = conn
-        .execute_dml_sql(
-            &format!(
-                "UPDATE schema_versions SET deleted = 1 \
-                 WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) \
-                   AND version = {version} AND deleted = 0"
-            ),
-            &[s(subject)],
-        )
-        .await?;
-    conn.commit().await?;
-    Ok((updated >= 1).then_some(version))
+    let r = (|| -> Result<Option<i32>, KoraError> {
+        let binds = [s(subject)];
+        let refs = to_refs(&binds);
+        let Some(version) = conn
+            .query(
+                "SELECT sv.version FROM schema_versions sv \
+                 JOIN subjects sub ON sv.subject_id = sub.id \
+                 WHERE sub.name = :1 AND sv.deleted = 0 \
+                 ORDER BY sv.version DESC FETCH FIRST 1 ROW ONLY",
+                &refs,
+            )
+            .map_err(map_ora)?
+            .next()
+            .transpose()
+            .map_err(map_ora)?
+            .map(|r| r.get::<usize, i32>(0))
+            .transpose()
+            .map_err(map_ora)?
+        else {
+            return Ok(None);
+        };
+        let updated = conn
+            .execute(
+                &format!(
+                    "UPDATE schema_versions SET deleted = 1 \
+                     WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) \
+                       AND version = {version} AND deleted = 0"
+                ),
+                &refs,
+            )
+            .map_err(map_ora)?
+            .row_count()
+            .map_err(map_ora)?;
+        Ok((updated >= 1).then_some(version))
+    })();
+    commit_or_rollback(conn, r)
 }
 
-pub(super) async fn soft_delete_schema_version(
-    store: &OracleStorage,
-    subject: &str,
-    version: i32,
-) -> Result<Option<i32>, KoraError> {
-    let conn = store.conn().await?;
-    let updated = conn
-        .execute_dml_sql(
-            &format!(
-                "UPDATE schema_versions SET deleted = 1 \
-                 WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) \
-                   AND version = {version} AND deleted = 0"
-            ),
-            &[s(subject)],
-        )
-        .await?;
-    conn.commit().await?;
-    Ok((updated >= 1).then_some(version))
-}
-
-pub(super) async fn hard_delete_schema_version(
-    store: &OracleStorage,
+pub(super) fn soft_delete_schema_version(
+    conn: &Connection,
     subject: &str,
     version: i32,
 ) -> Result<Option<i32>, KoraError> {
-    let conn = store.conn().await?;
-    let deleted = conn
-        .execute_dml_sql(
-            &format!(
-                "DELETE FROM schema_versions \
-                 WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) \
-                   AND version = {version} AND deleted = 1"
-            ),
-            &[s(subject)],
-        )
-        .await?;
-    conn.commit().await?;
-    Ok((deleted >= 1).then_some(version))
+    let r = (|| -> Result<Option<i32>, KoraError> {
+        let binds = [s(subject)];
+        let refs = to_refs(&binds);
+        let updated = conn
+            .execute(
+                &format!(
+                    "UPDATE schema_versions SET deleted = 1 \
+                     WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) \
+                       AND version = {version} AND deleted = 0"
+                ),
+                &refs,
+            )
+            .map_err(map_ora)?
+            .row_count()
+            .map_err(map_ora)?;
+        Ok((updated >= 1).then_some(version))
+    })();
+    commit_or_rollback(conn, r)
 }
 
-pub(super) async fn version_is_soft_deleted(
-    store: &OracleStorage,
+pub(super) fn hard_delete_schema_version(
+    conn: &Connection,
+    subject: &str,
+    version: i32,
+) -> Result<Option<i32>, KoraError> {
+    let r = (|| -> Result<Option<i32>, KoraError> {
+        let binds = [s(subject)];
+        let refs = to_refs(&binds);
+        let deleted = conn
+            .execute(
+                &format!(
+                    "DELETE FROM schema_versions \
+                     WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) \
+                       AND version = {version} AND deleted = 1"
+                ),
+                &refs,
+            )
+            .map_err(map_ora)?
+            .row_count()
+            .map_err(map_ora)?;
+        Ok((deleted >= 1).then_some(version))
+    })();
+    commit_or_rollback(conn, r)
+}
+
+pub(super) fn version_is_soft_deleted(
+    conn: &Connection,
     subject: &str,
     version: i32,
 ) -> Result<bool, KoraError> {
+    let binds = [s(subject), i(i64::from(version))];
     scalar_bool(
-        store,
+        conn,
         "SELECT CASE WHEN EXISTS (\
             SELECT 1 FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id \
             WHERE sub.name = :1 AND sv.version = :2 AND sv.deleted = 1\
          ) THEN 1 ELSE 0 END FROM dual",
-        &binds![subject, version],
+        &binds,
     )
-    .await
 }
 
-pub(super) async fn version_is_active(
-    store: &OracleStorage,
+pub(super) fn version_is_active(
+    conn: &Connection,
     subject: &str,
     version: i32,
 ) -> Result<bool, KoraError> {
+    let binds = [s(subject), i(i64::from(version))];
     scalar_bool(
-        store,
+        conn,
         "SELECT CASE WHEN EXISTS (\
             SELECT 1 FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id \
             WHERE sub.name = :1 AND sv.version = :2 AND sv.deleted = 0\
          ) THEN 1 ELSE 0 END FROM dual",
-        &binds![subject, version],
+        &binds,
     )
-    .await
 }
 
 // -- Registration helpers --
 
-/// Perform one registration attempt against `conn` in a single transaction.
-///
-/// Idempotent: when the fingerprint already maps to an active version it
+/// Perform one registration in a single transaction (the caller commits/rolls
+/// back). Idempotent: when the fingerprint already maps to an active version it
 /// returns that `(content_id, version, false)`; otherwise it inserts a new
-/// version and returns `(content_id, version, true)`. Because it is idempotent,
-/// `register_schema_atomically` can safely retry it on a fresh connection after
-/// a transient connection-level failure (see `is_transient`).
-async fn register_once(
-    conn: &CountedConn,
+/// version and returns `(content_id, version, true)`.
+fn register_once(
+    conn: &Connection,
     subject_name: &str,
     schema: &NewSchema<'_>,
     refs: &[SchemaReference],
     normalize: bool,
-    compat: Option<CompatCheck>,
+    compat: Option<&CompatCheck>,
 ) -> Result<(i64, i32, bool), KoraError> {
-    let subject_id = upsert_subject(conn, subject_name).await?;
+    let subject_id = upsert_subject(conn, subject_name)?;
 
     // Per-subject idempotency: existing active version with this fingerprint?
     let (fp, fp_col) = if normalize {
@@ -486,215 +486,202 @@ async fn register_once(
     } else {
         (schema.raw_fingerprint, "raw_fingerprint")
     };
-    let existing = conn
-        .query(
-            &format!(
-                "SELECT sv.content_id, sv.version FROM schema_versions sv \
-                 JOIN schema_contents sc ON sv.content_id = sc.id \
-                 WHERE sv.subject_id = {subject_id} AND sc.{fp_col} = :1 AND sv.deleted = 0 \
-                 ORDER BY sv.version FETCH FIRST 1 ROW ONLY"
-            ),
-            &[s(fp)],
-        )
-        .await?;
-    if let Some(row) = existing.first() {
-        let content_id = cell_i64(row, 0)?;
-        let version = cell_i32(row, 1)?;
-        conn.commit().await?;
+    let existing = first_row(
+        conn,
+        &format!(
+            "SELECT sv.content_id, sv.version FROM schema_versions sv \
+             JOIN schema_contents sc ON sv.content_id = sc.id \
+             WHERE sv.subject_id = {subject_id} AND sc.{fp_col} = :1 AND sv.deleted = 0 \
+             ORDER BY sv.version FETCH FIRST 1 ROW ONLY"
+        ),
+        &[s(fp)],
+    )?;
+    if let Some(row) = existing {
+        let content_id = row.get::<usize, i64>(0).map_err(map_ora)?;
+        let version = row.get::<usize, i32>(1).map_err(map_ora)?;
         return Ok((content_id, version, false));
     }
 
     // Compatibility check inside the transaction (after the subject lock).
     if let Some(compat) = compat {
-        run_compat_check(conn, subject_id, compat).await?;
+        run_compat_check(conn, subject_id, compat)?;
     }
 
-    let content_id = upsert_content(conn, schema).await?;
+    let content_id = upsert_content(conn, schema)?;
 
     // Next version under the locked subject, then insert.
-    let next = conn
-        .query(
-            &format!(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM schema_versions WHERE subject_id = {subject_id}"
-            ),
-            &[],
-        )
-        .await?;
-    let version = next
-        .first()
-        .and_then(|r| val_i64(r.get(0)))
-        .and_then(|v| i32::try_from(v).ok())
-        .ok_or_else(|| KoraError::BackendDataStore("could not compute next version".to_owned()))?;
-    conn.execute_dml_sql(
+    let version = scalar_opt::<i64>(
+        conn,
+        &format!(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM schema_versions WHERE subject_id = {subject_id}"
+        ),
+        &[],
+    )?
+    .and_then(|v| i32::try_from(v).ok())
+    .ok_or_else(|| KoraError::BackendDataStore("could not compute next version".to_owned()))?;
+    conn.execute(
         &format!(
             "INSERT INTO schema_versions (subject_id, version, content_id) \
              VALUES ({subject_id}, {version}, {content_id})"
         ),
         &[],
     )
-    .await?;
+    .map_err(map_ora)?;
 
     // Store references only when provided and the content has none yet.
     if !refs.is_empty() {
-        let has = conn
-            .query(
-                &format!(
-                    "SELECT CASE WHEN EXISTS \
-                     (SELECT 1 FROM schema_references WHERE content_id = {content_id}) \
-                     THEN 1 ELSE 0 END FROM dual"
-                ),
-                &[],
-            )
-            .await?;
-        if has.first().and_then(|r| val_i64(r.get(0))) != Some(1) {
+        let has_refs = scalar_bool(
+            conn,
+            &format!(
+                "SELECT CASE WHEN EXISTS \
+                 (SELECT 1 FROM schema_references WHERE content_id = {content_id}) \
+                 THEN 1 ELSE 0 END FROM dual"
+            ),
+            &[],
+        )?;
+        if !has_refs {
             for r in refs {
-                conn.execute_dml_sql(
+                let ref_binds = [s(&r.name), s(&r.subject)];
+                let ref_refs = to_refs(&ref_binds);
+                conn.execute(
                     &format!(
                         "INSERT INTO schema_references (content_id, name, subject, version) \
                          VALUES ({content_id}, :1, :2, {})",
                         r.version
                     ),
-                    &[s(&r.name), s(&r.subject)],
+                    &ref_refs,
                 )
-                .await?;
+                .map_err(map_ora)?;
             }
         }
     }
 
-    conn.commit().await?;
     Ok((content_id, version, true))
 }
 
-/// Whether an error is a transient, connection-level failure worth retrying on
-/// a fresh connection.
-///
-/// `oracle-rs` occasionally binds CLOB values through a temporary LOB that
-/// Oracle rejects under concurrency, severing the connection (surfaced as
-/// `ORA-00000` / "temporary LOB" / "closed the connection", and the follow-on
-/// `ORA-03113`/`ORA-03114`). Registration is idempotent, so these are safe to
-/// retry. Schema-level errors (incompatibility, missing references) are NOT
-/// transient and must surface immediately.
-fn is_transient(e: &KoraError) -> bool {
-    let KoraError::BackendDataStore(msg) = e else {
-        return false;
-    };
-    let m = msg.to_ascii_lowercase();
-    m.contains("closed the connection")
-        || m.contains("temporary lob")
-        || m.contains("ora-00000")
-        || m.contains("ora-03113")
-        || m.contains("ora-03114")
-}
-
 /// Upsert a subject by name and return its id, holding a row lock on it.
-async fn upsert_subject(conn: &CountedConn, name: &str) -> Result<i64, KoraError> {
+fn upsert_subject(conn: &Connection, name: &str) -> Result<i64, KoraError> {
+    let binds = [s(name)];
+    let refs = to_refs(&binds);
     let updated = conn
-        .execute_dml_sql(
+        .execute(
             "UPDATE subjects SET deleted = 0, updated_at = SYSTIMESTAMP WHERE name = :1",
-            &[s(name)],
+            &refs,
         )
-        .await?;
+        .map_err(map_ora)?
+        .row_count()
+        .map_err(map_ora)?;
     if updated == 0 {
         // Insert; a concurrent insert (ORA-00001) means the row now exists, so
         // re-run the update to re-activate and lock it.
-        match conn
-            .execute_dml_sql("INSERT INTO subjects (name) VALUES (:1)", &[s(name)])
-            .await
-        {
+        match conn.execute("INSERT INTO subjects (name) VALUES (:1)", &refs) {
             Ok(_) => {}
             Err(e) if is_unique_violation(&e) => {
-                conn.execute_dml_sql(
+                conn.execute(
                     "UPDATE subjects SET deleted = 0, updated_at = SYSTIMESTAMP WHERE name = :1",
-                    &[s(name)],
+                    &refs,
                 )
-                .await?;
+                .map_err(map_ora)?;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(map_ora(e)),
         }
     }
-    let result = conn
-        .query("SELECT id FROM subjects WHERE name = :1", &[s(name)])
-        .await?;
-    result
-        .first()
-        .and_then(|row| val_i64(row.get(0)))
+    scalar_opt::<i64>(conn, "SELECT id FROM subjects WHERE name = :1", &binds)?
         .ok_or_else(|| KoraError::BackendDataStore("subject id missing after upsert".to_owned()))
 }
 
 /// Deduplicate schema content globally and return its id (`ON CONFLICT
 /// (raw_fingerprint)` equivalent).
-async fn upsert_content(conn: &CountedConn, schema: &NewSchema<'_>) -> Result<i64, KoraError> {
+fn upsert_content(conn: &Connection, schema: &NewSchema<'_>) -> Result<i64, KoraError> {
     let raw_fp = schema.raw_fingerprint;
-    let existing = conn
-        .query(
-            "SELECT id FROM schema_contents WHERE raw_fingerprint = :1",
-            &[s(raw_fp)],
-        )
-        .await?;
-    if let Some(id) = existing.first().and_then(|row| val_i64(row.get(0))) {
+    let fp_binds = [s(raw_fp)];
+    let select_id = "SELECT id FROM schema_contents WHERE raw_fingerprint = :1";
+    if let Some(id) = scalar_opt::<i64>(conn, select_id, &fp_binds)? {
         // Mirror EXCLUDED.schema_type from the Postgres upsert.
-        conn.execute_dml_sql(
+        let upd_binds = [s(schema.schema_type)];
+        let upd_refs = to_refs(&upd_binds);
+        conn.execute(
             &format!("UPDATE schema_contents SET schema_type = :1 WHERE id = {id}"),
-            &[s(schema.schema_type)],
+            &upd_refs,
         )
-        .await?;
+        .map_err(map_ora)?;
         return Ok(id);
     }
 
-    let insert = conn
-        .execute_dml_sql(
-            "INSERT INTO schema_contents \
-                (schema_type, schema_text, canonical_form, fingerprint, raw_fingerprint) \
-             VALUES (:1, :2, :3, :4, :5)",
-            &[
-                s(schema.schema_type),
-                s(schema.schema_text),
-                s(schema.canonical_form),
-                s(schema.fingerprint),
-                s(raw_fp),
-            ],
-        )
-        .await;
-    match insert {
+    // `schema_text` / `canonical_form` are CLOB columns; bind them explicitly as
+    // CLOB so values larger than ~32 KB write correctly (a plain string bind
+    // would default to NVARCHAR2 and fail with ORA-01461 / ORA-22835).
+    let ins_binds = [
+        s(schema.schema_type),
+        clob(schema.schema_text),
+        clob(schema.canonical_form),
+        s(schema.fingerprint),
+        s(raw_fp),
+    ];
+    let ins_refs = to_refs(&ins_binds);
+    match conn.execute(
+        "INSERT INTO schema_contents \
+            (schema_type, schema_text, canonical_form, fingerprint, raw_fingerprint) \
+         VALUES (:1, :2, :3, :4, :5)",
+        &ins_refs,
+    ) {
         Ok(_) => {}
         Err(e) if is_unique_violation(&e) => {} // concurrent insert — re-select below
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(map_ora(e)),
     }
-    let result = conn
-        .query(
-            "SELECT id FROM schema_contents WHERE raw_fingerprint = :1",
-            &[s(raw_fp)],
-        )
-        .await?;
-    result
-        .first()
-        .and_then(|row| val_i64(row.get(0)))
+    scalar_opt::<i64>(conn, select_id, &fp_binds)?
         .ok_or_else(|| KoraError::BackendDataStore("content id missing after upsert".to_owned()))
 }
 
 /// Run the in-transaction compatibility check (mirror of the Postgres path).
-async fn run_compat_check(
-    conn: &CountedConn,
+fn run_compat_check(
+    conn: &Connection,
     subject_id: i64,
-    compat: CompatCheck,
+    compat: &CompatCheck,
 ) -> Result<(), KoraError> {
     // Transitive mode (empty `versions`) re-fetches all versions inside the
     // transaction; non-transitive uses the pre-fetched set. Evaluation is shared.
     if compat.versions.is_empty() {
-        let result = query_all(
+        let versions = collect_svs(
             conn,
             &format!(
-                "SELECT {SV_COLS_META} {SV_JOIN} \
+                "SELECT {SV_COLS} {SV_JOIN} \
                  WHERE sv.subject_id = {subject_id} AND sv.deleted = 0 ORDER BY sv.version"
             ),
             &[],
-            0,
-            -1,
-        )
-        .await?;
-        let versions = collect_svs(conn, &result).await?;
-        crate::storage::compat::evaluate(&versions, &compat)
+        )?;
+        crate::storage::compat::evaluate(&versions, compat)
     } else {
-        crate::storage::compat::evaluate(&compat.versions, &compat)
+        crate::storage::compat::evaluate(&compat.versions, compat)
     }
+}
+
+// -- Local helpers --
+
+/// Map a row selecting [`SV_COLS`] (in order: id, subject, version,
+/// `schema_type`, `schema_text`) to a [`SchemaVersion`]. `schema_text` is a CLOB
+/// read inline.
+fn row_to_sv(row: &Row) -> Result<SchemaVersion, KoraError> {
+    Ok(SchemaVersion {
+        id: row.get::<usize, i64>(0).map_err(map_ora)?,
+        subject: row.get::<usize, String>(1).map_err(map_ora)?,
+        version: row.get::<usize, i32>(2).map_err(map_ora)?,
+        schema_type: row.get::<usize, String>(3).map_err(map_ora)?,
+        schema: row.get::<usize, String>(4).map_err(map_ora)?,
+        references: Vec::new(),
+    })
+}
+
+/// Run a SELECT of [`SV_COLS`] and collect the rows as [`SchemaVersion`]s.
+fn collect_svs(
+    conn: &Connection,
+    sql: &str,
+    binds: &[OraBind],
+) -> Result<Vec<SchemaVersion>, KoraError> {
+    let refs = to_refs(binds);
+    let mut out = Vec::new();
+    for row in conn.query(sql, &refs).map_err(map_ora)? {
+        out.push(row_to_sv(&row.map_err(map_ora)?)?);
+    }
+    Ok(out)
 }

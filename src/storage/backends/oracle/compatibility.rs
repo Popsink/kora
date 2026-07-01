@@ -1,195 +1,199 @@
 //! Oracle SQL for the compatibility-config-domain `Storage` operations.
 
-use crate::binds;
+use oracle::Connection;
+
 use crate::error::KoraError;
-use crate::storage::sql::SqlExecutor;
-use crate::storage::sql::helpers::{
-    scalar_bool, scalar_opt_bool, scalar_opt_string, scalar_string,
+
+use super::driver::{
+    OraBind, b, commit_or_rollback, first_row, is_unique_violation, map_ora, s, scalar_bool,
+    scalar_opt, scalar_opt_string, scalar_string, to_refs,
 };
 
-use super::OracleStorage;
-use super::driver::{is_unique_violation, s, val_i64};
-
-pub(super) async fn get_subject_level(
-    store: &OracleStorage,
+pub(super) fn get_subject_level(
+    conn: &Connection,
     subject: &str,
 ) -> Result<Option<String>, KoraError> {
     scalar_opt_string(
-        store,
+        conn,
         "SELECT compatibility_level FROM config \
          WHERE subject = :1 AND compatibility_level IS NOT NULL",
-        &binds![subject],
+        &[s(subject)],
     )
-    .await
 }
 
-pub(super) async fn get_global_level(store: &OracleStorage) -> Result<String, KoraError> {
+pub(super) fn get_global_level(conn: &Connection) -> Result<String, KoraError> {
     scalar_string(
-        store,
+        conn,
         "SELECT COALESCE(compatibility_level, 'BACKWARD') FROM config WHERE subject IS NULL",
         &[],
     )
-    .await
 }
 
-pub(super) async fn set_global_level(
-    store: &OracleStorage,
+pub(super) fn set_global_level(
+    conn: &Connection,
     level: &str,
     normalize: bool,
 ) -> Result<String, KoraError> {
-    store
-        .execute(
-            "UPDATE config SET compatibility_level = :1, normalize = :2, \
-             updated_at = SYSTIMESTAMP WHERE subject IS NULL",
-            &binds![level, normalize],
-        )
-        .await?;
+    let r = execute_one(
+        conn,
+        "UPDATE config SET compatibility_level = :1, normalize = :2, \
+         updated_at = SYSTIMESTAMP WHERE subject IS NULL",
+        &[s(level), b(normalize)],
+    );
+    commit_or_rollback(conn, r)?;
     Ok(level.to_owned())
 }
 
-pub(super) async fn reconcile_global_level(
-    store: &OracleStorage,
-    level: &str,
-) -> Result<String, KoraError> {
-    store
-        .execute(
-            "UPDATE config SET compatibility_level = :1, updated_at = SYSTIMESTAMP \
-             WHERE subject IS NULL",
-            &binds![level],
-        )
-        .await?;
+pub(super) fn reconcile_global_level(conn: &Connection, level: &str) -> Result<String, KoraError> {
+    let r = execute_one(
+        conn,
+        "UPDATE config SET compatibility_level = :1, updated_at = SYSTIMESTAMP \
+         WHERE subject IS NULL",
+        &[s(level)],
+    );
+    commit_or_rollback(conn, r)?;
     Ok(level.to_owned())
 }
 
-pub(super) async fn set_subject_level(
-    store: &OracleStorage,
+pub(super) fn set_subject_level(
+    conn: &Connection,
     subject: &str,
     level: &str,
     normalize: bool,
 ) -> Result<String, KoraError> {
-    let n = i64::from(normalize);
-    let conn = store.conn().await?;
-    let updated = conn
-        .execute_dml_sql(
-            &format!(
-                "UPDATE config SET compatibility_level = :1, normalize = {n}, \
-                 updated_at = SYSTIMESTAMP WHERE subject = :2"
-            ),
-            &[s(level), s(subject)],
-        )
-        .await?;
-    if updated == 0 {
-        let insert = conn
-            .execute_dml_sql(
+    let r = (|| -> Result<(), KoraError> {
+        let n = i64::from(normalize);
+        let upd_binds = [s(level), s(subject)];
+        let upd_refs = to_refs(&upd_binds);
+        let upd_sql = format!(
+            "UPDATE config SET compatibility_level = :1, normalize = {n}, \
+             updated_at = SYSTIMESTAMP WHERE subject = :2"
+        );
+        let updated = conn
+            .execute(&upd_sql, &upd_refs)
+            .map_err(map_ora)?
+            .row_count()
+            .map_err(map_ora)?;
+        if updated == 0 {
+            // INSERT; a concurrent insert (ORA-00001) means the row now exists,
+            // so re-run the UPDATE.
+            let ins_binds = [s(subject), s(level)];
+            let ins_refs = to_refs(&ins_binds);
+            match conn.execute(
                 &format!(
                     "INSERT INTO config (subject, compatibility_level, normalize) \
                      VALUES (:1, :2, {n})"
                 ),
-                &[s(subject), s(level)],
-            )
-            .await;
-        match insert {
-            Ok(_) => {}
-            Err(e) if is_unique_violation(&e) => {
-                conn.execute_dml_sql(
-                    &format!(
-                        "UPDATE config SET compatibility_level = :1, normalize = {n}, \
-                         updated_at = SYSTIMESTAMP WHERE subject = :2"
-                    ),
-                    &[s(level), s(subject)],
-                )
-                .await?;
+                &ins_refs,
+            ) {
+                Ok(_) => {}
+                Err(e) if is_unique_violation(&e) => {
+                    conn.execute(&upd_sql, &upd_refs).map_err(map_ora)?;
+                }
+                Err(e) => return Err(map_ora(e)),
             }
-            Err(e) => return Err(e.into()),
         }
-    }
-    conn.commit().await?;
+        Ok(())
+    })();
+    commit_or_rollback(conn, r)?;
     Ok(level.to_owned())
 }
 
-pub(super) async fn delete_subject_level(
-    store: &OracleStorage,
+pub(super) fn delete_subject_level(
+    conn: &Connection,
     subject: &str,
 ) -> Result<Option<(String, bool)>, KoraError> {
-    let conn = store.conn().await?;
-    let current = conn
-        .query(
+    let r = (|| -> Result<Option<(String, bool)>, KoraError> {
+        let binds = [s(subject)];
+        let refs = to_refs(&binds);
+        let result = first_level_normalize(
+            conn,
             "SELECT compatibility_level, COALESCE(normalize, 0) FROM config \
              WHERE subject = :1 AND compatibility_level IS NOT NULL FOR UPDATE",
-            &[s(subject)],
-        )
-        .await?;
-    let result = current.first().map(|row| {
-        let level = row.get_string(0).unwrap_or_default().to_owned();
-        let norm = val_i64(row.get(1)).unwrap_or(0) != 0;
-        (level, norm)
-    });
-    if result.is_some() {
-        conn.execute_dml_sql(
-            "UPDATE config SET compatibility_level = NULL, normalize = NULL, \
-             updated_at = SYSTIMESTAMP WHERE subject = :1",
-            &[s(subject)],
-        )
-        .await?;
-        conn.execute_dml_sql(
-            "DELETE FROM config \
-             WHERE subject = :1 AND compatibility_level IS NULL AND registry_mode IS NULL",
-            &[s(subject)],
-        )
-        .await?;
-    }
-    conn.commit().await?;
-    Ok(result)
+            &binds,
+        )?;
+        if result.is_some() {
+            conn.execute(
+                "UPDATE config SET compatibility_level = NULL, normalize = NULL, \
+                 updated_at = SYSTIMESTAMP WHERE subject = :1",
+                &refs,
+            )
+            .map_err(map_ora)?;
+            conn.execute(
+                "DELETE FROM config \
+                 WHERE subject = :1 AND compatibility_level IS NULL AND registry_mode IS NULL",
+                &refs,
+            )
+            .map_err(map_ora)?;
+        }
+        Ok(result)
+    })();
+    commit_or_rollback(conn, r)
 }
 
-pub(super) async fn get_global_normalize(store: &OracleStorage) -> Result<bool, KoraError> {
+pub(super) fn get_global_normalize(conn: &Connection) -> Result<bool, KoraError> {
     scalar_bool(
-        store,
+        conn,
         "SELECT COALESCE(normalize, 0) FROM config WHERE subject IS NULL",
         &[],
     )
-    .await
 }
 
-pub(super) async fn get_subject_normalize(
-    store: &OracleStorage,
+pub(super) fn get_subject_normalize(
+    conn: &Connection,
     subject: &str,
 ) -> Result<Option<bool>, KoraError> {
-    scalar_opt_bool(
-        store,
+    Ok(scalar_opt::<i64>(
+        conn,
         "SELECT COALESCE(normalize, 0) FROM config \
          WHERE subject = :1 AND compatibility_level IS NOT NULL",
-        &binds![subject],
-    )
-    .await
+        &[s(subject)],
+    )?
+    .map(|n| n == 1))
 }
 
-pub(super) async fn delete_global_level(
-    store: &OracleStorage,
-) -> Result<(String, bool), KoraError> {
-    let conn = store.conn().await?;
-    let current = conn
-        .query(
+pub(super) fn delete_global_level(conn: &Connection) -> Result<(String, bool), KoraError> {
+    let r = (|| -> Result<(String, bool), KoraError> {
+        let current = first_level_normalize(
+            conn,
             "SELECT COALESCE(compatibility_level, 'BACKWARD'), COALESCE(normalize, 0) \
              FROM config WHERE subject IS NULL FOR UPDATE",
             &[],
+        )?
+        .unwrap_or_else(|| ("BACKWARD".to_owned(), false));
+        conn.execute(
+            "UPDATE config SET compatibility_level = 'BACKWARD', normalize = 0, \
+             updated_at = SYSTIMESTAMP WHERE subject IS NULL",
+            &[],
         )
-        .await?;
-    let (level, normalize) = current.first().map_or_else(
-        || ("BACKWARD".to_owned(), false),
-        |row| {
-            (
-                row.get_string(0).unwrap_or("BACKWARD").to_owned(),
-                val_i64(row.get(1)).unwrap_or(0) != 0,
-            )
-        },
-    );
-    conn.execute_dml_sql(
-        "UPDATE config SET compatibility_level = 'BACKWARD', normalize = 0, \
-         updated_at = SYSTIMESTAMP WHERE subject IS NULL",
-        &[],
-    )
-    .await?;
-    conn.commit().await?;
-    Ok((level, normalize))
+        .map_err(map_ora)?;
+        Ok(current)
+    })();
+    commit_or_rollback(conn, r)
+}
+
+// -- Local helpers --
+
+/// Run a single DML statement (ignoring the affected-row count).
+fn execute_one(conn: &Connection, sql: &str, binds: &[OraBind]) -> Result<(), KoraError> {
+    let refs = to_refs(binds);
+    conn.execute(sql, &refs).map_err(map_ora)?;
+    Ok(())
+}
+
+/// Read a `(compatibility_level, normalize)` row (column 0 text, column 1 a
+/// `0`/`1` flag), or `None` when there is no row.
+fn first_level_normalize(
+    conn: &Connection,
+    sql: &str,
+    binds: &[OraBind],
+) -> Result<Option<(String, bool)>, KoraError> {
+    first_row(conn, sql, binds)?
+        .map(|row| -> Result<(String, bool), KoraError> {
+            Ok((
+                row.get::<usize, String>(0).map_err(map_ora)?,
+                row.get::<usize, i64>(1).map_err(map_ora)? != 0,
+            ))
+        })
+        .transpose()
 }

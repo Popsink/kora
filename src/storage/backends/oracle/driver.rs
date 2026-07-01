@@ -1,276 +1,145 @@
-//! `oracle_rs` driver workarounds and the shared decode machinery.
+//! Shared bind/decode helpers for the (blocking) `oracle` ODPI-C driver.
 //!
-//! This module isolates everything that exists only because the pure-Rust
-//! `oracle_rs` 0.1 driver is young: the positional [`SqlRow`] adapter
-//! ([`OraRow`]), bind lowering ([`lower`]), the four read-path workarounds
-//! ([`query_all`], [`fetch_schema_texts`], the CLOB cell readers, and the
-//! error classifiers), and the `SchemaVersion` row mappers. The thin adapter
-//! (`super`) and the per-domain SQL modules call into these.
+//! The `oracle` crate (kubo/rust-oracle, ODPI-C / Instant Client) is a mature,
+//! thick driver: it closes server cursors on `Statement` drop (no cursor leak),
+//! returns whole result sets with no row cap, decodes `NUMBER` straight to
+//! `i64`/`i32`, and reads CLOBs inline as `String`. So this module is now small:
+//! the [`OraBind`] parameter enum (uniform `&[&dyn ToSql]` bindings, with an
+//! explicit-CLOB variant for the large schema-text columns), the `:N` constructor
+//! helpers, error mapping/classification, and the window-clause builder.
 //!
-//! ## Working around `oracle_rs` 0.1 limitations
+//! ## Dialect notes
 //!
-//! The pure-Rust driver is young, and three quirks shape the read path here:
+//! The query layer is a hand-written Oracle translation of the `PostgreSQL`
+//! statements in the sibling modules. Conventions used throughout:
 //!
-//! * **Row cap per fetch.** `query` returns at most ~100 rows and its
-//!   cursor-continuation is unusable (`has_more_rows` is an unreliable
-//!   false-negative and `fetch_more` returns nothing), so multi-row reads page
-//!   with independent `OFFSET … FETCH NEXT …` queries — see [`query_all`].
-//! * **Multi-row CLOB decode.** Selecting a CLOB across a large multi-row
-//!   response mis-decodes ("buffer underflow"), so `schema_text` is excluded
-//!   from multi-row metadata queries ([`SV_COLS_META`]) and read in adaptive,
-//!   self-splitting batches ([`fetch_schema_texts`]); single-row reads embed it.
-//! * **Cursor leak.** Each `query`/`execute` leaks a server cursor for the
-//!   connection's lifetime (the driver never closes them), so a single connection
-//!   can serve only `open_cursors` (typically 300+) statements before the server
-//!   drops it. The batching above keeps any one request's statement count low, and
-//!   [`super::pool`] proactively retires a connection before it reaches the limit
-//!   (counting statements per connection) — releasing all its cursors. Together
-//!   they keep sustained load under the ceiling.
+//! * **All per-execution values are bound** as `:1`, `:2`, … (each a distinct
+//!   placeholder — a value needed twice gets two placeholders so binds never
+//!   collide). Booleans are lowered to the integers `0`/`1` so the dialect SQL
+//!   compares them as `:N = 1`, matching the `NUMBER(1)` storage of the boolean
+//!   columns. Only table/column **identifiers** may be `format!`-inlined.
+//! * The two large text columns (`schema_text`, `canonical_form`) are bound with
+//!   [`clob`] ([`OraBind::Clob`]), which forces an explicit `OracleType::CLOB`
+//!   bind so values larger than ~32 KB write correctly (a plain string bind would
+//!   default to `NVARCHAR2` and fail with ORA-01461 / ORA-22835).
+//! * `now()` → `SYSTIMESTAMP`; `ON CONFLICT` → `UPDATE`-then-`INSERT` with a
+//!   unique-violation retry; `DISTINCT ON` → `ROW_NUMBER()`; `^@` → `INSTR(..)=1`;
+//!   `SELECT EXISTS(..)` → `SELECT CASE WHEN EXISTS(..) THEN 1 ELSE 0 END FROM dual`.
+//! * The registry-mode column is named `registry_mode` here (it is `mode` on
+//!   Postgres) because `MODE` is an Oracle reserved word.
 
-use std::collections::HashMap;
-
-use oracle_rs::types::LobValue;
-use oracle_rs::{QueryResult, Row, Value};
+use oracle::Connection;
+use oracle::SqlValue;
+use oracle::sql_type::{OracleType, ToSql};
 
 use crate::error::KoraError;
-use crate::storage::backends::oracle::pool::CountedConn;
-use crate::storage::sql::{Bind, Row as SqlRow};
-use crate::storage::types::SchemaVersion;
 
 /// Embedded Oracle migration (idempotent PL/SQL block).
 pub(super) const MIGRATION_001: &str =
     include_str!("../../../../migrations/oracle/001_initial_schema.sql");
 
 /// Columns and joins selected for every [`SchemaVersion`] lookup, in the fixed
-/// order consumed by [`row_to_sv`].
+/// order consumed by the row mappers (`id, subject, version, schema_type,
+/// schema_text`). `schema_text` is a CLOB read inline as a `String`.
+///
+/// [`SchemaVersion`]: crate::storage::types::SchemaVersion
 pub(super) const SV_COLS: &str = "sc.id, sub.name, sv.version, sc.schema_type, sc.schema_text";
 pub(super) const SV_JOIN: &str = "FROM schema_versions sv \
      JOIN subjects sub ON sv.subject_id = sub.id \
      JOIN schema_contents sc ON sv.content_id = sc.id";
 
-/// Metadata columns (no CLOB) for **multi-row** lookups. The `oracle-rs` driver
-/// mis-decodes a CLOB column inside a multi-row `SELECT` result, so multi-row
-/// reads omit `schema_text` and fetch the CLOBs separately in batches via
-/// [`fetch_schema_texts`]; single-row reads ([`SV_COLS`]) decode the CLOB inline.
-pub(super) const SV_COLS_META: &str = "sc.id, sub.name, sv.version, sc.schema_type";
-
-/// Lower neutral [`Bind`]s to bound `oracle_rs` [`Value`]s.
+/// A value bound into a parameterized query.
 ///
-/// Every parameter — strings, integers, and booleans — becomes a bound `:N`
-/// variable (no inlining on the toolkit path). Booleans map to the integers
-/// `0`/`1`, so the dialect SQL compares them as `:N = 1`, matching the
-/// `NUMBER(1)` storage of the boolean columns.
-pub(super) fn lower(params: &[Bind]) -> Vec<Value> {
-    params
-        .iter()
-        .map(|b| match b {
-            Bind::Str(s) => Value::from(s.as_str()),
-            Bind::I64(i) => Value::from(*i),
-            Bind::Bool(v) => Value::from(i64::from(*v)),
-        })
-        .collect()
+/// All variants implement [`ToSql`] so a `&[OraBind]` lowers to the
+/// `&[&dyn ToSql]` the driver's `query`/`execute` expect (via [`to_refs`]).
+/// [`OraBind::Clob`] forces an explicit `OracleType::CLOB` bind type so large
+/// schema-text values write correctly; the others use the driver's default
+/// mapping (`String`/`&str` → `NVARCHAR2`, `i64` → `NUMBER`).
+pub(super) enum OraBind {
+    /// A text value (`NVARCHAR2`).
+    Str(String),
+    /// A signed integer (`NUMBER`); booleans are lowered to `0`/`1` here.
+    Int(i64),
+    /// A large text value bound explicitly as `CLOB` (`schema_text` /
+    /// `canonical_form`), so values larger than ~32 KB write correctly.
+    Clob(String),
 }
 
-/// Wraps an `oracle_rs` [`Row`] so it can be decoded positionally through the
-/// backend-neutral [`SqlRow`] trait, reusing the file's decode helpers (which
-/// absorb Oracle's `NUMBER`-as-decimal-string and `NUMBER(1)`-boolean quirks).
-pub struct OraRow(pub(super) Row);
-
-impl SqlRow for OraRow {
-    fn get_i64(&self, idx: usize) -> Result<i64, KoraError> {
-        val_i64(self.0.get(idx))
-            .ok_or_else(|| KoraError::BackendDataStore(format!("expected integer at column {idx}")))
-    }
-
-    fn get_i32(&self, idx: usize) -> Result<i32, KoraError> {
-        i32::try_from(self.get_i64(idx)?)
-            .map_err(|_| KoraError::BackendDataStore("integer out of range".to_owned()))
-    }
-
-    fn get_str(&self, idx: usize) -> Result<String, KoraError> {
-        // SYNC: handles only non-CLOB / inline values (the only thing the shared
-        // helpers ever ask for; CLOB schema_text is read elsewhere via cell_text).
-        match self.0.get(idx) {
-            Some(Value::String(s)) => Ok(s.clone()),
-            Some(Value::Bytes(b)) => Ok(String::from_utf8_lossy(b).into_owned()),
-            Some(Value::Lob(LobValue::Inline(b))) => Ok(String::from_utf8_lossy(b).into_owned()),
-            Some(Value::Lob(LobValue::Locator(_))) => Err(KoraError::BackendDataStore(
-                "clob locator requires async read".to_owned(),
-            )),
-            None | Some(Value::Null) => Ok(String::new()),
-            Some(other) => Ok(other.to_string()),
+impl ToSql for OraBind {
+    fn oratype(&self, conn: &Connection) -> oracle::Result<OracleType> {
+        match self {
+            Self::Str(s) => s.oratype(conn),
+            Self::Int(n) => n.oratype(conn),
+            Self::Clob(_) => Ok(OracleType::CLOB),
         }
     }
 
-    fn get_bool(&self, idx: usize) -> Result<bool, KoraError> {
-        Ok(val_i64(self.0.get(idx)) == Some(1))
-    }
-
-    fn get_opt_i64(&self, idx: usize) -> Result<Option<i64>, KoraError> {
-        Ok(val_i64(self.0.get(idx)))
-    }
-
-    fn get_opt_str(&self, idx: usize) -> Result<Option<String>, KoraError> {
-        match self.0.get(idx) {
-            None | Some(Value::Null) => Ok(None),
-            _ => Ok(Some(self.get_str(idx)?)),
+    fn to_sql(&self, val: &mut SqlValue) -> oracle::Result<()> {
+        match self {
+            Self::Str(s) | Self::Clob(s) => s.to_sql(val),
+            Self::Int(n) => n.to_sql(val),
         }
     }
 }
 
-// -- Value / row helpers --
-
-/// True when the error is ORA-00001 (unique constraint violated).
-pub(super) fn is_unique_violation(e: &oracle_rs::Error) -> bool {
-    e.to_string().contains("ORA-00001")
+/// Bind a string value (`:N`, `NVARCHAR2`).
+pub(super) fn s(v: &str) -> OraBind {
+    OraBind::Str(v.to_owned())
 }
 
-/// Bind a string value.
-pub(super) fn s(v: &str) -> Value {
-    Value::from(v)
-}
-
-/// Bind an integer value as a `:N` placeholder.
+/// Bind an integer value (`:N`, `NUMBER`).
 ///
 /// Per-execution integers (ids, versions) must be **bound**, not inlined into the
 /// SQL text: an inlined literal produces a distinct SQL string per value, forcing
-/// a hard parse — and a dynamic-sampling (`OPT_DYN_SAMP`) pass — on every call.
-/// Binding keeps the SQL text constant so the statement parses once and its cursor
-/// is shared. Only table/column **identifiers** may be `format!`-inlined.
-pub(super) fn i(v: i64) -> Value {
-    Value::from(v)
+/// a hard parse on every call. Binding keeps the SQL text constant so the
+/// statement parses once and its cursor is shared.
+pub(super) fn i(v: i64) -> OraBind {
+    OraBind::Int(v)
 }
 
-/// Extract an `i64` from a column value.
+/// Bind a boolean value, lowered to the integer `0`/`1` (`NUMBER(1)`).
 ///
-/// The `oracle-rs` driver returns Oracle `NUMBER` columns (including identity
-/// ids, `COUNT(*)`, and `CASE … THEN 1 ELSE 0` predicates) as decimal **strings**
-/// to preserve precision, so fall back to parsing a string value.
-pub(super) fn val_i64(v: Option<&Value>) -> Option<i64> {
-    match v? {
-        Value::String(text) => text.trim().parse::<i64>().ok(),
-        other => other.as_i64(),
-    }
+/// A native `bool` bind would map to `OracleType::Boolean`, which Oracle accepts
+/// only in PL/SQL — never as a `NUMBER(1)` column comparison — so booleans are
+/// always lowered to integers here.
+pub(super) fn b(v: bool) -> OraBind {
+    OraBind::Int(i64::from(v))
 }
 
-/// Extract a text column, transparently reading CLOBs (inline or via locator).
-pub(super) async fn cell_text(conn: &CountedConn, v: Option<&Value>) -> Result<String, KoraError> {
-    match v {
-        Some(Value::String(s)) => Ok(s.clone()),
-        Some(Value::Bytes(b)) => Ok(String::from_utf8_lossy(b).into_owned()),
-        Some(Value::Lob(LobValue::Inline(b))) => Ok(String::from_utf8_lossy(b).into_owned()),
-        Some(Value::Lob(LobValue::Locator(loc))) => Ok(conn.read_clob(loc).await?),
-        None | Some(Value::Null | Value::Lob(_)) => Ok(String::new()),
-        Some(other) => Ok(other.to_string()),
-    }
+/// Bind a large text value explicitly as `CLOB` (`schema_text` / `canonical_form`).
+pub(super) fn clob(v: &str) -> OraBind {
+    OraBind::Clob(v.to_owned())
 }
 
-/// Extract a required integer column.
-pub(super) fn cell_i64(row: &Row, idx: usize) -> Result<i64, KoraError> {
-    val_i64(row.get(idx))
-        .ok_or_else(|| KoraError::BackendDataStore(format!("expected integer at column {idx}")))
-}
-
-/// Extract a required `i32` column (version numbers).
-pub(super) fn cell_i32(row: &Row, idx: usize) -> Result<i32, KoraError> {
-    i32::try_from(cell_i64(row, idx)?)
-        .map_err(|_| KoraError::BackendDataStore("integer out of range".to_owned()))
-}
-
-/// Map a row selecting [`SV_COLS`] (in order) to a [`SchemaVersion`].
-pub(super) async fn row_to_sv(conn: &CountedConn, row: &Row) -> Result<SchemaVersion, KoraError> {
-    Ok(SchemaVersion {
-        id: cell_i64(row, 0)?,
-        subject: cell_text(conn, row.get(1)).await?,
-        version: cell_i32(row, 2)?,
-        schema_type: cell_text(conn, row.get(3)).await?,
-        schema: cell_text(conn, row.get(4)).await?,
-        references: Vec::new(),
-    })
-}
-
-/// Collect rows selecting [`SV_COLS_META`] (4 columns, no CLOB) as
-/// [`SchemaVersion`]s, fetching their `schema_text` CLOBs in batches.
-pub(super) async fn collect_svs(
-    conn: &CountedConn,
-    result: &QueryResult,
-) -> Result<Vec<SchemaVersion>, KoraError> {
-    let ids = result
-        .iter()
-        .map(|row| cell_i64(row, 0))
-        .collect::<Result<Vec<_>, _>>()?;
-    let texts = fetch_schema_texts(conn, &ids).await?;
-    let mut out = Vec::with_capacity(result.row_count());
-    for row in result.iter() {
-        let id = cell_i64(row, 0)?;
-        out.push(SchemaVersion {
-            id,
-            subject: cell_text(conn, row.get(1)).await?,
-            version: cell_i32(row, 2)?,
-            schema_type: cell_text(conn, row.get(3)).await?,
-            schema: texts.get(&id).cloned().unwrap_or_default(),
-            references: Vec::new(),
-        });
-    }
-    Ok(out)
-}
-
-/// Optimistic batch size for [`fetch_schema_texts`]. The driver mis-decodes a
-/// CLOB across a large multi-row response ("buffer underflow"), a fault that
-/// grows with the total bytes in the batch, so this stays well below where it
-/// trips for typical schemas; oversized batches are split adaptively.
-const CLOB_BATCH: usize = 50;
-
-/// True for the driver's multi-row CLOB decode fault, which is recoverable by
-/// reading fewer rows at a time.
-pub(super) fn is_buffer_underflow(e: &oracle_rs::Error) -> bool {
-    e.to_string().contains("buffer underflow")
-}
-
-/// Fetch `schema_text` for many content ids at once, returning an id → text map.
+/// Borrow a slice of [`OraBind`]s as the `&[&dyn ToSql]` the driver expects.
 ///
-/// The schema text is a CLOB, and the driver has two opposing limitations:
-/// reading one row per query leaks a server cursor each call (the session dies
-/// after a few hundred), while selecting the CLOB across a large multi-row
-/// response mis-decodes ("buffer underflow"). So ids are read in `IN (...)`
-/// batches — few queries — and any batch that trips the decode fault is split
-/// in half and retried, down to a single row, which always decodes correctly.
-pub(super) async fn fetch_schema_texts(
-    conn: &CountedConn,
-    ids: &[i64],
-) -> Result<HashMap<i64, String>, KoraError> {
-    let mut map = HashMap::with_capacity(ids.len());
-    // Worklist of id slices to read; an oversized batch is replaced by its two
-    // halves. Pushed in reverse so the first chunk is processed first.
-    let mut todo: Vec<&[i64]> = ids.chunks(CLOB_BATCH).rev().collect();
-    while let Some(slice) = todo.pop() {
-        let in_list = slice
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        match conn
-            .query(
-                &format!("SELECT id, schema_text FROM schema_contents WHERE id IN ({in_list})"),
-                &[],
-            )
-            .await
-        {
-            Ok(result) => {
-                for row in result.iter() {
-                    let id = cell_i64(row, 0)?;
-                    map.insert(id, cell_text(conn, row.get(1)).await?);
-                }
-            }
-            Err(e) if slice.len() > 1 && is_buffer_underflow(&e) => {
-                let mid = slice.len() / 2;
-                todo.push(&slice[mid..]);
-                todo.push(&slice[..mid]);
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(map)
+/// The returned `Vec` borrows from `binds`, so `binds` must outlive it (the
+/// caller keeps both in scope for the duration of the `query`/`execute` call).
+pub(super) fn to_refs(binds: &[OraBind]) -> Vec<&dyn ToSql> {
+    binds.iter().map(|x| x as &dyn ToSql).collect()
+}
+
+/// Map a driver error to [`KoraError::BackendDataStore`].
+///
+/// Takes the error by value so it can be used directly as `.map_err(map_ora)`.
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn map_ora(e: oracle::Error) -> KoraError {
+    KoraError::BackendDataStore(e.to_string())
+}
+
+/// True when the error is ORA-00001 (unique constraint violated).
+pub(super) fn is_unique_violation(e: &oracle::Error) -> bool {
+    e.oci_code() == Some(1)
+}
+
+/// True for transient listener/handoff errors seen while establishing connections,
+/// especially against Oracle Free under bursty connection creation. These are safe
+/// to retry: the listener is momentarily unable to hand off or has not finished
+/// registering the service.
+///   ORA-12516/12518/12520 — listener could not hand off / no handler available
+///   ORA-12514/12564       — service not (yet) registered / connection refused
+pub(super) fn is_transient_connect(e: &oracle::Error) -> bool {
+    matches!(e.oci_code(), Some(12516 | 12518 | 12520 | 12514 | 12564))
 }
 
 /// Escape LIKE metacharacters and append `%`, mirroring the `PostgreSQL` layer.
@@ -284,62 +153,107 @@ pub(super) fn like_pattern(prefix: Option<&str>) -> Option<String> {
     })
 }
 
-/// The driver's hard-coded fetch/prefetch size: a single `query` round-trip
-/// returns at most this many rows (see `oracle_rs` `execute_query_with_params`).
-const ORACLE_FETCH_SIZE: usize = 100;
-
-/// Run a SELECT and return the **full** result for the requested window.
-///
-/// `oracle-rs` returns at most [`ORACLE_FETCH_SIZE`] rows per round-trip and its
-/// cursor-continuation (`fetch_more`) is unusable in this version: it reports
-/// `has_more_rows = false` even with rows pending and returns nothing on the
-/// next fetch. So instead of draining one cursor, this pages with independent
-/// `OFFSET … FETCH NEXT …` queries — each a fresh statement capped at the fetch
-/// size — until a short page signals the end (or `limit` is satisfied).
+/// Append an `OFFSET … ROWS [FETCH NEXT … ROWS ONLY]` window to an ordered SELECT.
 ///
 /// `base_sql` must be a complete, ordered SELECT **without** a trailing
 /// `OFFSET/FETCH` clause (a deterministic `ORDER BY` is required for stable
-/// paging). `limit < 0` means unbounded. The aggregated rows are returned as a
-/// single [`QueryResult`] so callers consume them exactly as a normal query.
-pub(super) async fn query_all(
-    conn: &CountedConn,
-    base_sql: &str,
-    params: &[Value],
-    offset: i64,
-    limit: i64,
-) -> Result<QueryResult, KoraError> {
-    let mut columns = Vec::new();
-    let mut rows = Vec::new();
-    let mut page_offset = offset.max(0);
-    loop {
-        // Rows still wanted this page; the driver caps any fetch at the size.
-        let want = if limit < 0 {
-            ORACLE_FETCH_SIZE
-        } else {
-            let remaining = limit - i64::try_from(rows.len()).unwrap_or(i64::MAX);
-            if remaining <= 0 {
-                break;
-            }
-            let cap = i64::try_from(ORACLE_FETCH_SIZE).unwrap_or(i64::MAX);
-            usize::try_from(remaining.min(cap)).unwrap_or(ORACLE_FETCH_SIZE)
-        };
-        let sql = format!("{base_sql} OFFSET {page_offset} ROWS FETCH NEXT {want} ROWS ONLY");
-        let mut page = conn.query(&sql, params).await?;
-        if columns.is_empty() {
-            columns = page.columns.clone();
-        }
-        let got = page.row_count();
-        rows.append(&mut page.rows);
-        if got < want {
-            break; // short page → no more rows
-        }
-        page_offset += i64::try_from(got).unwrap_or(0);
+/// paging). `limit < 0` means unbounded (offset only). Negative offsets are
+/// clamped to `0`.
+pub(super) fn append_window(base_sql: &str, offset: i64, limit: i64) -> String {
+    let off = offset.max(0);
+    if limit < 0 {
+        format!("{base_sql} OFFSET {off} ROWS")
+    } else {
+        format!("{base_sql} OFFSET {off} ROWS FETCH NEXT {limit} ROWS ONLY")
     }
-    Ok(QueryResult {
-        columns,
-        rows,
-        rows_affected: 0,
-        has_more_rows: false,
-        cursor_id: 0,
-    })
+}
+
+// -- Transaction / query helpers --
+//
+// These centralize the patterns every per-domain module would otherwise repeat:
+// commit-or-rollback for transactional writes, and "first row, column 0" scalar
+// reads. The per-domain modules keep their dialect SQL verbatim and call these
+// for the mechanical parts.
+
+/// Commit on `Ok`, roll back on `Err`, then return the result unchanged.
+///
+/// Every transactional operation must wrap its body in this: the native OCI pool
+/// does not roll back a dirty connection when it is returned (unlike a recycling
+/// pool), so a leaked pending transaction would be inherited by the next borrower.
+pub(super) fn commit_or_rollback<T>(
+    conn: &Connection,
+    result: Result<T, KoraError>,
+) -> Result<T, KoraError> {
+    match result {
+        Ok(v) => {
+            conn.commit().map_err(map_ora)?;
+            Ok(v)
+        }
+        Err(e) => {
+            conn.rollback().ok();
+            Err(e)
+        }
+    }
+}
+
+/// Run a query and return its first [`Row`], or `None` when the result is empty.
+///
+/// [`Row`]: oracle::Row
+pub(super) fn first_row(
+    conn: &Connection,
+    sql: &str,
+    binds: &[OraBind],
+) -> Result<Option<oracle::Row>, KoraError> {
+    let refs = to_refs(binds);
+    conn.query(sql, &refs)
+        .map_err(map_ora)?
+        .next()
+        .transpose()
+        .map_err(map_ora)
+}
+
+/// First column of the first row decoded as `T`, or `None` when the result is
+/// empty (the column value itself may also be SQL `NULL` if `T` is an `Option`).
+pub(super) fn scalar_opt<T>(
+    conn: &Connection,
+    sql: &str,
+    binds: &[OraBind],
+) -> Result<Option<T>, KoraError>
+where
+    T: oracle::sql_type::FromSql,
+{
+    first_row(conn, sql, binds)?
+        .map(|row| row.get::<usize, T>(0))
+        .transpose()
+        .map_err(map_ora)
+}
+
+/// First column of the first row as text, erroring if there is no row. Use for
+/// `COALESCE`d queries that always return exactly one non-null row.
+pub(super) fn scalar_string(
+    conn: &Connection,
+    sql: &str,
+    binds: &[OraBind],
+) -> Result<String, KoraError> {
+    scalar_opt::<String>(conn, sql, binds)?
+        .ok_or_else(|| KoraError::BackendDataStore("expected exactly one row".to_owned()))
+}
+
+/// First column of the first row as text, or `None` when absent/NULL.
+pub(super) fn scalar_opt_string(
+    conn: &Connection,
+    sql: &str,
+    binds: &[OraBind],
+) -> Result<Option<String>, KoraError> {
+    scalar_opt::<Option<String>>(conn, sql, binds).map(Option::flatten)
+}
+
+/// Read a `0`/`1` existence query (`CASE WHEN EXISTS … FROM dual`) as a bool;
+/// `false` when there is no row.
+pub(super) fn scalar_bool(
+    conn: &Connection,
+    sql: &str,
+    binds: &[OraBind],
+) -> Result<bool, KoraError> {
+    Ok(scalar_opt::<i64>(conn, sql, binds)? == Some(1))
 }

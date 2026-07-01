@@ -42,9 +42,7 @@ Append `oracle` to any recipe (e.g. `just stress oracle`, `just soak oracle`) to
 
 Kora supports Oracle in production, so the same scenarios run against it: `just <scenario> oracle` (e.g. `just stress oracle`) spins up Oracle Free, builds Kora with `--features oracle`, and points it at `FREEPDB1`.
 
-> **⚠️ Driver limit (mitigated).** The pure-Rust `oracle-rs` 0.1 driver **leaks one server cursor per statement** for the connection's lifetime (it never closes them), so an un-managed connection would be dropped by Oracle once it reaches `open_cursors` (~300). Kora's Oracle pool works around this by **retiring a connection before it crosses a statement threshold** (`ORACLE_MAX_QUERIES_PER_CONN`, default 200), tearing down the session to free its cursors — the per-statement analogue of HikariCP's `maxLifetime`. Under sustained load (`stress`, `soak`) connections are recycled transparently, so reads should **not** show a baseline error rate. Watch the leak/recycle live with `just monitor oracle`: open cursors per session should climb toward the threshold and then reset as connections retire.
-
-> **Sizing.** Retirement is checked at **checkout**, so a single request can still burst statements on a borrowed connection (a large paginated listing, or a transitive-compatibility scan over a long version history). The invariant is `ORACLE_MAX_QUERIES_PER_CONN + worst-case single-request burst < open_cursors`. It's a balance: too high overflows `open_cursors`; too **low** churns reconnections (which under heavy load can overwhelm Oracle and surface as `connection refused`). The right operating point is a **generous `open_cursors`** with a moderate threshold — exactly how a production DB is configured. The load-test harness therefore raises the Oracle instance to `open_cursors = 1000` on boot (a stock gvenzl image defaults to 300), giving the default threshold (200) ~800 cursors of headroom. In production, set `open_cursors` similarly and tune the threshold to taste.
+> **Driver.** Kora's Oracle backend uses the mature [`oracle`](https://crates.io/crates/oracle) crate (ODPI-C / Oracle Instant Client). It closes server cursors on statement completion (no cursor leak) and reads CLOBs natively, so there is no connection-recycling workaround and no special `open_cursors` tuning — the gvenzl default is fine. The blocking driver is bridged onto the async runtime with one `spawn_blocking` per operation, bounded by a semaphore sized to `DB_POOL_MAX`. The load-test host must have the Instant Client libraries installed.
 
 ## Interpreting results
 
@@ -109,7 +107,8 @@ The load test PostgreSQL image has `pg_stat_statements` enabled. Run `just monit
 
 Run `just monitor oracle` during an Oracle test (connects as `SYSTEM`, since the `V$` views aren't granted to `kora`) to see:
 
-- The `open_cursors` ceiling and **open cursors per `kora` session** — the key metric: watch it climb toward the ceiling (the driver cursor leak in action)
+- The `open_cursors` ceiling and open cursors per `kora` session (stays low/stable — the thick `oracle` driver closes cursors on statement completion, so there is no leak to watch for)
 - Active `kora` sessions and their wait events
 - Top SQL by elapsed time
 - Blocking sessions (lock contention)
+

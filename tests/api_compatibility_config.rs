@@ -400,3 +400,36 @@ async fn reconcile_global_level_preserves_normalize_flag() {
     // Restore the suite default.
     storage.set_global_level("BACKWARD", false).await.unwrap();
 }
+
+/// A boolean config column must round-trip both `true` and `false`. This guards
+/// the Oracle path: booleans are stored in `NUMBER(1)` columns and must be bound
+/// as the integers `0`/`1` — a native `bool` bind would map to `OracleType::Boolean`
+/// (PL/SQL only) and be rejected against `NUMBER(1)`. Per-subject (unique subject),
+/// so it needs no `#[serial]`. Backend-agnostic: also exercises the Postgres path.
+#[tokio::test]
+async fn subject_normalize_flag_round_trips_true_and_false() {
+    let storage = common::storage().await;
+    let subject = format!("bool-roundtrip-{}", uuid::Uuid::new_v4());
+
+    // normalize = true → stored as NUMBER(1) 1, read back as true.
+    storage
+        .set_subject_level(&subject, "BACKWARD", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_subject_normalize(&subject).await.unwrap(),
+        Some(true),
+        "normalize=true must round-trip"
+    );
+
+    // normalize = false → stored as NUMBER(1) 0, read back as false.
+    storage
+        .set_subject_level(&subject, "FULL", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_subject_normalize(&subject).await.unwrap(),
+        Some(false),
+        "normalize=false must round-trip"
+    );
+}

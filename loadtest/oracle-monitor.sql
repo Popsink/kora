@@ -13,12 +13,13 @@ COLUMN event FORMAT A30
 COLUMN sql_text FORMAT A60
 COLUMN wait_class FORMAT A15
 
-PROMPT == 1. open_cursors ceiling (a session is dropped when it reaches this) ==
+PROMPT == 1. open_cursors ceiling ==
 SELECT name, value FROM v$parameter WHERE name = 'open_cursors';
 
 PROMPT
-PROMPT == 2. Open cursors per kora session — watch this climb toward open_cursors ==
-PROMPT ==    (oracle-rs 0.1 leaks one server cursor per query; this is the leak) ==
+PROMPT == 2. Open cursors per kora session ==
+PROMPT ==    (the thick `oracle` driver closes cursors on statement drop, so
+PROMPT ==    this stays low/stable — no leak to watch for) ==
 SELECT s.sid, s.serial#, COUNT(*) AS open_cursors
 FROM v$open_cursor oc
 JOIN v$session s ON s.sid = oc.sid
@@ -27,23 +28,14 @@ GROUP BY s.sid, s.serial#
 ORDER BY open_cursors DESC;
 
 PROMPT
-PROMPT == 3. "opened cursors current" stat per kora session (same leak, session view) ==
-SELECT s.sid, st.value AS opened_cursors_current
-FROM v$sesstat st
-JOIN v$statname n ON n.statistic# = st.statistic#
-JOIN v$session s ON s.sid = st.sid
-WHERE n.name = 'opened cursors current' AND s.username = 'KORA'
-ORDER BY st.value DESC;
-
-PROMPT
-PROMPT == 4. Active kora sessions ==
+PROMPT == 3. Active kora sessions ==
 SELECT sid, serial#, status, event, sql_id
 FROM v$session
 WHERE username = 'KORA'
 ORDER BY status, sid;
 
 PROMPT
-PROMPT == 5. Top SQL by elapsed time ==
+PROMPT == 4. Top SQL by elapsed time ==
 SELECT * FROM (
   SELECT sql_id,
          executions AS execs,
@@ -54,7 +46,7 @@ SELECT * FROM (
 ) WHERE ROWNUM <= 15;
 
 PROMPT
-PROMPT == 6. Blocking sessions (lock contention) ==
+PROMPT == 5. Blocking sessions (lock contention) ==
 SELECT blocking_session, sid, serial#, wait_class, event
 FROM v$session
 WHERE blocking_session IS NOT NULL;

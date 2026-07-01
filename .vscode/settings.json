@@ -1,0 +1,15 @@
+{
+  // Every integrated terminal opens straight into the project's devbox shell,
+  // which ensures the pinned toolchain + Oracle Instant Client are installed and
+  // on the loader path (see devbox.json). Requires devbox to be installed:
+  // https://www.jetify.com/docs/devbox/installing_devbox/
+  "terminal.integrated.profiles.osx": {
+    "devbox": { "path": "devbox", "args": ["shell"] }
+  },
+  "terminal.integrated.defaultProfile.osx": "devbox",
+
+  "terminal.integrated.profiles.linux": {
+    "devbox": { "path": "devbox", "args": ["shell"] }
+  },
+  "terminal.integrated.defaultProfile.linux": "devbox"
+}

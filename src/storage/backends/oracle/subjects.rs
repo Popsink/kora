@@ -1,15 +1,17 @@
 //! Oracle SQL for the subject-domain `Storage` operations.
 
-use crate::binds;
+use oracle::Connection;
+
 use crate::error::KoraError;
-use crate::storage::sql::helpers::{fetch_strings, scalar_bool, scalar_opt_i64};
 use crate::storage::types::HardDeleteResult;
 
-use super::OracleStorage;
-use super::driver::{cell_i32, cell_i64, like_pattern, query_all, s, val_i64};
+use super::driver::{
+    OraBind, append_window, b, commit_or_rollback, like_pattern, map_ora, s, scalar_bool,
+    scalar_opt, to_refs,
+};
 
-pub(super) async fn list_subjects(
-    store: &OracleStorage,
+pub(super) fn list_subjects(
+    conn: &Connection,
     include_deleted: bool,
     deleted_only: bool,
     prefix: Option<&str>,
@@ -23,92 +25,96 @@ pub(super) async fn list_subjects(
     } else {
         "deleted = 0"
     };
-    if let Some(pat) = like_pattern(prefix) {
-        let sql = format!(
-            "SELECT name FROM subjects WHERE {filter} AND name LIKE :1 ESCAPE '\\' ORDER BY name"
-        );
-        fetch_strings(store, &sql, &binds![pat], offset, limit).await
+    let (base_sql, binds): (String, Vec<OraBind>) = if let Some(pat) = like_pattern(prefix) {
+        (
+            format!(
+                "SELECT name FROM subjects WHERE {filter} AND name LIKE :1 ESCAPE '\\' ORDER BY name"
+            ),
+            vec![s(&pat)],
+        )
     } else {
-        let sql = format!("SELECT name FROM subjects WHERE {filter} ORDER BY name");
-        fetch_strings(store, &sql, &[], offset, limit).await
+        (
+            format!("SELECT name FROM subjects WHERE {filter} ORDER BY name"),
+            Vec::new(),
+        )
+    };
+    let sql = append_window(&base_sql, offset, limit);
+    let refs = to_refs(&binds);
+    let mut out = Vec::new();
+    for row in conn.query(&sql, &refs).map_err(map_ora)? {
+        out.push(
+            row.map_err(map_ora)?
+                .get::<usize, String>(0)
+                .map_err(map_ora)?,
+        );
     }
+    Ok(out)
 }
 
-pub(super) async fn soft_delete_subject(
-    store: &OracleStorage,
-    name: &str,
-) -> Result<Vec<i32>, KoraError> {
-    let conn = store.conn().await?;
-    let result = query_all(
-        &conn,
-        "SELECT sv.version FROM schema_versions sv \
-         WHERE sv.subject_id = (SELECT id FROM subjects WHERE name = :1) AND sv.deleted = 0 \
-         ORDER BY sv.version",
-        &[s(name)],
-        0,
-        -1,
-    )
-    .await?;
-    let mut versions = Vec::with_capacity(result.row_count());
-    for row in result.iter() {
-        versions.push(cell_i32(row, 0)?);
-    }
-    conn.execute_dml_sql(
-        "UPDATE schema_versions SET deleted = 1 \
-         WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) AND deleted = 0",
-        &[s(name)],
-    )
-    .await?;
-    conn.execute_dml_sql(
-        "UPDATE subjects SET deleted = 1 WHERE name = :1 AND deleted = 0",
-        &[s(name)],
-    )
-    .await?;
-    conn.commit().await?;
-    versions.sort_unstable();
-    Ok(versions)
+pub(super) fn soft_delete_subject(conn: &Connection, name: &str) -> Result<Vec<i32>, KoraError> {
+    let r = (|| -> Result<Vec<i32>, KoraError> {
+        let binds = [s(name)];
+        let refs = to_refs(&binds);
+        let mut versions = collect_i32(
+            conn,
+            "SELECT sv.version FROM schema_versions sv \
+             WHERE sv.subject_id = (SELECT id FROM subjects WHERE name = :1) AND sv.deleted = 0 \
+             ORDER BY sv.version",
+            &refs,
+        )?;
+        conn.execute(
+            "UPDATE schema_versions SET deleted = 1 \
+             WHERE subject_id = (SELECT id FROM subjects WHERE name = :1) AND deleted = 0",
+            &refs,
+        )
+        .map_err(map_ora)?;
+        conn.execute(
+            "UPDATE subjects SET deleted = 1 WHERE name = :1 AND deleted = 0",
+            &refs,
+        )
+        .map_err(map_ora)?;
+        versions.sort_unstable();
+        Ok(versions)
+    })();
+    commit_or_rollback(conn, r)
 }
 
-pub(super) async fn hard_delete_subject(
-    store: &OracleStorage,
+pub(super) fn hard_delete_subject(
+    conn: &Connection,
     name: &str,
 ) -> Result<HardDeleteResult, KoraError> {
-    let conn = store.conn().await?;
-    let found = conn
-        .query(
-            "SELECT id, deleted FROM subjects WHERE name = :1 FOR UPDATE",
-            &[s(name)],
-        )
-        .await?;
-    let Some(row) = found.first() else {
-        return Ok(HardDeleteResult::NotFound);
-    };
-    let subject_id = cell_i64(row, 0)?;
-    let deleted = cell_i64(row, 1)?;
-    if deleted == 0 {
-        conn.rollback().await?;
-        return Ok(HardDeleteResult::NotSoftDeleted);
-    }
-
-    let vresult = query_all(
-        &conn,
-        &format!(
-            "SELECT version FROM schema_versions \
-             WHERE subject_id = {subject_id} AND deleted = 1 ORDER BY version"
-        ),
-        &[],
-        0,
-        -1,
-    )
-    .await?;
-    let mut versions = Vec::with_capacity(vresult.row_count());
-    for row in vresult.iter() {
-        versions.push(cell_i32(row, 0)?);
-    }
-
-    for v in &versions {
-        let referenced = conn
+    let r = (|| -> Result<HardDeleteResult, KoraError> {
+        let binds = [s(name)];
+        let refs = to_refs(&binds);
+        let Some(row) = conn
             .query(
+                "SELECT id, deleted FROM subjects WHERE name = :1 FOR UPDATE",
+                &refs,
+            )
+            .map_err(map_ora)?
+            .next()
+        else {
+            return Ok(HardDeleteResult::NotFound);
+        };
+        let row = row.map_err(map_ora)?;
+        let subject_id = row.get::<usize, i64>(0).map_err(map_ora)?;
+        let deleted = row.get::<usize, i64>(1).map_err(map_ora)?;
+        if deleted == 0 {
+            return Ok(HardDeleteResult::NotSoftDeleted);
+        }
+
+        let mut versions = collect_i32(
+            conn,
+            &format!(
+                "SELECT version FROM schema_versions \
+                 WHERE subject_id = {subject_id} AND deleted = 1 ORDER BY version"
+            ),
+            &[],
+        )?;
+
+        for v in &versions {
+            let referenced = scalar_bool(
+                conn,
                 &format!(
                     "SELECT CASE WHEN EXISTS (\
                         SELECT 1 FROM schema_references sr \
@@ -116,83 +122,95 @@ pub(super) async fn hard_delete_subject(
                         WHERE sr.subject = :1 AND sr.version = {v} AND sv.deleted = 0\
                      ) THEN 1 ELSE 0 END FROM dual"
                 ),
-                &[s(name)],
-            )
-            .await?;
-        if referenced.first().and_then(|r| val_i64(r.get(0))) == Some(1) {
-            conn.rollback().await?;
-            return Ok(HardDeleteResult::ReferenceExists(format!(
-                "{name} version {v}"
-            )));
+                &binds,
+            )?;
+            if referenced {
+                return Ok(HardDeleteResult::ReferenceExists(format!(
+                    "{name} version {v}"
+                )));
+            }
         }
-    }
 
-    conn.execute_dml_sql(
-        &format!("DELETE FROM schema_versions WHERE subject_id = {subject_id} AND deleted = 1"),
-        &[],
-    )
-    .await?;
+        conn.execute(
+            &format!("DELETE FROM schema_versions WHERE subject_id = {subject_id} AND deleted = 1"),
+            &[],
+        )
+        .map_err(map_ora)?;
 
-    let active = conn
-        .query(
+        let has_active = scalar_bool(
+            conn,
             &format!(
                 "SELECT CASE WHEN EXISTS (\
                     SELECT 1 FROM schema_versions WHERE subject_id = {subject_id} AND deleted = 0\
                  ) THEN 1 ELSE 0 END FROM dual"
             ),
             &[],
-        )
-        .await?;
-    if active.first().and_then(|r| val_i64(r.get(0))) != Some(1) {
-        conn.execute_dml_sql(
-            &format!("DELETE FROM subjects WHERE id = {subject_id}"),
-            &[],
-        )
-        .await?;
-    }
+        )?;
+        if !has_active {
+            conn.execute(
+                &format!("DELETE FROM subjects WHERE id = {subject_id}"),
+                &[],
+            )
+            .map_err(map_ora)?;
+        }
 
-    conn.commit().await?;
-    versions.sort_unstable();
-    Ok(HardDeleteResult::Deleted(versions))
+        versions.sort_unstable();
+        Ok(HardDeleteResult::Deleted(versions))
+    })();
+    commit_or_rollback(conn, r)
 }
 
-pub(super) async fn find_subject_id_by_name(
-    store: &OracleStorage,
+pub(super) fn find_subject_id_by_name(
+    conn: &Connection,
     name: &str,
     include_deleted: bool,
 ) -> Result<Option<i64>, KoraError> {
-    scalar_opt_i64(
-        store,
+    scalar_opt::<i64>(
+        conn,
         "SELECT id FROM subjects WHERE name = :1 AND (deleted = 0 OR :2 = 1)",
-        &binds![name, include_deleted],
+        &[s(name), b(include_deleted)],
     )
-    .await
 }
 
-pub(super) async fn subject_exists(
-    store: &OracleStorage,
+pub(super) fn subject_exists(
+    conn: &Connection,
     name: &str,
     include_deleted: bool,
 ) -> Result<bool, KoraError> {
     scalar_bool(
-        store,
+        conn,
         "SELECT CASE WHEN EXISTS \
          (SELECT 1 FROM subjects WHERE name = :1 AND (deleted = 0 OR :2 = 1)) \
          THEN 1 ELSE 0 END FROM dual",
-        &binds![name, include_deleted],
+        &[s(name), b(include_deleted)],
     )
-    .await
 }
 
-pub(super) async fn subject_is_soft_deleted(
-    store: &OracleStorage,
-    name: &str,
-) -> Result<bool, KoraError> {
+pub(super) fn subject_is_soft_deleted(conn: &Connection, name: &str) -> Result<bool, KoraError> {
     scalar_bool(
-        store,
+        conn,
         "SELECT CASE WHEN EXISTS \
          (SELECT 1 FROM subjects WHERE name = :1 AND deleted = 1) THEN 1 ELSE 0 END FROM dual",
-        &binds![name],
+        &[s(name)],
     )
-    .await
+}
+
+// -- Local helpers --
+
+/// Collect the first (`i32`) column of an ordered query into a `Vec` (version
+/// lists). Shared by the two delete paths above.
+fn collect_i32(
+    conn: &Connection,
+    sql: &str,
+    refs: &[&dyn oracle::sql_type::ToSql],
+) -> Result<Vec<i32>, KoraError> {
+    let mut out = Vec::new();
+    for row in conn.query(sql, refs).map_err(map_ora)? {
+        out.push(
+            row.map_err(map_ora)?
+                .get::<usize, i32>(0)
+                .map_err(map_ora)?,
+        );
+    }
+    Ok(out)
 }

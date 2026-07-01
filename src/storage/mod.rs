@@ -612,7 +612,6 @@ async fn connect_oracle(cfg: &KoraConfig) -> Result<DynStorage, StorageInitError
         &cfg.db_user,
         &cfg.db_password,
         cfg.db_pool_max,
-        cfg.oracle_max_queries_per_conn,
     )
     .await
     .map_err(|e| StorageInitError::Backend(e.to_string()))?;

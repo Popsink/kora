@@ -22,7 +22,7 @@ extraDeploy: []
 ## @section Image parameters
 ## @param image.registry Kora image registry
 ## @param image.repository Kora image repository
-## @param image.tag Kora image tag (defaults to "v{appVersion}")
+## @param image.tag Kora image tag (defaults to "v{appVersion}-{database.backend}", e.g. v{appVersion}-postgres or v{appVersion}-oracle)
 ## @param image.digest Kora image digest in sha256:aa... format (overrides tag)
 ## @param image.pullPolicy Kora image pull policy
 ## @param image.pullSecrets Kora image pull secrets
@@ -54,7 +54,7 @@ kora:
   extraEnvVarsSecret: ""
 
 ## @section Database parameters (external PostgreSQL or Oracle)
-## @param database.backend Backing store engine: "postgres" (default) or "oracle". Oracle needs an Oracle-enabled image (built with the `oracle` cargo feature — still a single static binary, no Instant Client).
+## @param database.backend Backing store engine: "postgres" (default) or "oracle". The chart automatically selects the matching image (`-postgres` or `-oracle`, the latter glibc + bundled Oracle Instant Client); override `image.tag` only to pin explicitly.
 ## @param database.host Database host
 ## @param database.port Database port (PostgreSQL 5432, Oracle 1521)
 ## @param database.user Database user
