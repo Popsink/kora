@@ -1,15 +1,12 @@
 //! Subject operations for the `PostgreSQL` backend.
 //!
-//! Simple reads run through the SQL toolkit helpers; the two delete paths run in
-//! a transaction over the raw [`PgPool`](sqlx::PgPool) and own their dialect SQL
-//! verbatim.
+//! Simple reads run single statements over the pool; the two delete paths run
+//! in a transaction over the raw [`PgPool`](sqlx::PgPool).
 
-use crate::binds;
 use crate::error::KoraError;
-use crate::storage::sql::helpers::{fetch_strings, scalar_bool, scalar_opt_i64};
 use crate::storage::types::HardDeleteResult;
 
-use super::{PgStorage, like_pattern};
+use super::{PgStorage, like_pattern, paged};
 
 pub(super) async fn list_subjects(
     store: &PgStorage,
@@ -28,14 +25,29 @@ pub(super) async fn list_subjects(
     } else {
         "deleted = false"
     };
+    // SAFETY (sqlx 0.9 `SqlSafeStr`): `sql` is built from hardcoded literals and
+    // internal pagination i64s; the LIKE pattern is bound, never spliced.
     if let Some(pat) = like_pattern(prefix) {
-        let sql = format!(
-            "SELECT name FROM subjects WHERE {filter} AND name LIKE $1 ESCAPE '\\' ORDER BY name"
+        let sql = paged(
+            &format!(
+                "SELECT name FROM subjects WHERE {filter} AND name LIKE $1 ESCAPE '\\' ORDER BY name"
+            ),
+            offset,
+            limit,
         );
-        fetch_strings(store, &sql, &binds![pat], offset, limit).await
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(pat)
+            .fetch_all(store.pool())
+            .await?)
     } else {
-        let sql = format!("SELECT name FROM subjects WHERE {filter} ORDER BY name");
-        fetch_strings(store, &sql, &[], offset, limit).await
+        let sql = paged(
+            &format!("SELECT name FROM subjects WHERE {filter} ORDER BY name"),
+            offset,
+            limit,
+        );
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .fetch_all(store.pool())
+            .await?)
     }
 }
 
@@ -44,12 +56,13 @@ pub(super) async fn find_subject_id_by_name(
     name: &str,
     include_deleted: bool,
 ) -> Result<Option<i64>, KoraError> {
-    scalar_opt_i64(
-        store,
-        "SELECT id FROM subjects WHERE name = $1 AND (deleted = false OR $2)",
-        &binds![name, include_deleted],
+    Ok(
+        sqlx::query_scalar("SELECT id FROM subjects WHERE name = $1 AND (deleted = false OR $2)")
+            .bind(name)
+            .bind(include_deleted)
+            .fetch_optional(store.pool())
+            .await?,
     )
-    .await
 }
 
 pub(super) async fn subject_exists(
@@ -57,24 +70,25 @@ pub(super) async fn subject_exists(
     name: &str,
     include_deleted: bool,
 ) -> Result<bool, KoraError> {
-    scalar_bool(
-        store,
+    Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM subjects WHERE name = $1 AND (deleted = false OR $2))",
-        &binds![name, include_deleted],
     )
-    .await
+    .bind(name)
+    .bind(include_deleted)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn subject_is_soft_deleted(
     store: &PgStorage,
     name: &str,
 ) -> Result<bool, KoraError> {
-    scalar_bool(
-        store,
+    Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM subjects WHERE name = $1 AND deleted = true)",
-        &binds![name],
     )
-    .await
+    .bind(name)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 // -- Transactional operations --

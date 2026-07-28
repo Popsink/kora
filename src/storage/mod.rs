@@ -10,7 +10,6 @@
 
 pub mod backends;
 pub mod compat;
-pub mod sql;
 pub mod types;
 
 use std::sync::Arc;

@@ -1,47 +1,44 @@
 //! Registry-mode operations for the `PostgreSQL` backend.
 //!
-//! Simple reads/writes run through the SQL toolkit helpers; the reset and
+//! Simple reads/writes run single statements over the pool; the reset and
 //! per-subject clear paths run in a transaction over the raw
 //! [`PgPool`](sqlx::PgPool) so they can read the previous value and clear it
 //! (and any orphan config rows) atomically.
 
-use crate::binds;
 use crate::error::KoraError;
-use crate::storage::sql::helpers::{scalar_opt_string, scalar_string};
 
 use super::PgStorage;
 
 pub(super) async fn get_global_mode(store: &PgStorage) -> Result<String, KoraError> {
-    scalar_string(
-        store,
-        "SELECT COALESCE(mode, 'READWRITE') FROM config WHERE subject IS NULL",
-        &[],
+    Ok(
+        sqlx::query_scalar("SELECT COALESCE(mode, 'READWRITE') FROM config WHERE subject IS NULL")
+            .fetch_one(store.pool())
+            .await?,
     )
-    .await
 }
 
 pub(super) async fn set_global_mode(
     store: &PgStorage,
     mode_value: &str,
 ) -> Result<String, KoraError> {
-    scalar_string(
-        store,
+    Ok(sqlx::query_scalar(
         "UPDATE config SET mode = $1, updated_at = now() WHERE subject IS NULL RETURNING mode",
-        &binds![mode_value],
     )
-    .await
+    .bind(mode_value)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn get_subject_mode(
     store: &PgStorage,
     subject: &str,
 ) -> Result<Option<String>, KoraError> {
-    scalar_opt_string(
-        store,
-        "SELECT mode FROM config WHERE subject = $1 AND mode IS NOT NULL",
-        &binds![subject],
+    Ok(
+        sqlx::query_scalar("SELECT mode FROM config WHERE subject = $1 AND mode IS NOT NULL")
+            .bind(subject)
+            .fetch_optional(store.pool())
+            .await?,
     )
-    .await
 }
 
 pub(super) async fn set_subject_mode(
@@ -49,30 +46,31 @@ pub(super) async fn set_subject_mode(
     subject: &str,
     mode_value: &str,
 ) -> Result<String, KoraError> {
-    scalar_string(
-        store,
+    Ok(sqlx::query_scalar(
         r"INSERT INTO config (subject, mode)
           VALUES ($1, $2)
           ON CONFLICT (subject) DO UPDATE SET mode = $2, updated_at = now()
           RETURNING mode",
-        &binds![subject, mode_value],
     )
-    .await
+    .bind(subject)
+    .bind(mode_value)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn get_effective_mode(
     store: &PgStorage,
     subject: &str,
 ) -> Result<String, KoraError> {
-    scalar_string(
-        store,
+    Ok(sqlx::query_scalar(
         r"SELECT COALESCE(
             (SELECT mode FROM config WHERE subject = $1 AND mode IS NOT NULL),
             (SELECT COALESCE(mode, 'READWRITE') FROM config WHERE subject IS NULL)
           )",
-        &binds![subject],
     )
-    .await
+    .bind(subject)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 // -- Transactional operations --

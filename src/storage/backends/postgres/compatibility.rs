@@ -1,14 +1,10 @@
 //! Compatibility-config operations for the `PostgreSQL` backend.
 //!
-//! Simple reads/writes run through the SQL toolkit helpers; the two reset paths
+//! Simple reads/writes run single statements over the pool; the two reset paths
 //! run in a transaction over the raw [`PgPool`](sqlx::PgPool) so they can read the
 //! previous value and clear it atomically.
 
-use crate::binds;
 use crate::error::KoraError;
-use crate::storage::sql::helpers::{
-    scalar_bool, scalar_opt_bool, scalar_opt_string, scalar_string,
-};
 
 use super::PgStorage;
 
@@ -16,21 +12,20 @@ pub(super) async fn get_subject_level(
     store: &PgStorage,
     subject: &str,
 ) -> Result<Option<String>, KoraError> {
-    scalar_opt_string(
-        store,
+    Ok(sqlx::query_scalar(
         "SELECT compatibility_level FROM config WHERE subject = $1 AND compatibility_level IS NOT NULL",
-        &binds![subject],
     )
-    .await
+    .bind(subject)
+    .fetch_optional(store.pool())
+    .await?)
 }
 
 pub(super) async fn get_global_level(store: &PgStorage) -> Result<String, KoraError> {
-    scalar_string(
-        store,
+    Ok(sqlx::query_scalar(
         "SELECT COALESCE(compatibility_level, 'BACKWARD') FROM config WHERE subject IS NULL",
-        &[],
     )
-    .await
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn set_global_level(
@@ -38,28 +33,29 @@ pub(super) async fn set_global_level(
     level: &str,
     normalize: bool,
 ) -> Result<String, KoraError> {
-    scalar_string(
-        store,
+    Ok(sqlx::query_scalar(
         r"UPDATE config SET compatibility_level = $1, normalize = $2, updated_at = now()
           WHERE subject IS NULL
           RETURNING compatibility_level",
-        &binds![level, normalize],
     )
-    .await
+    .bind(level)
+    .bind(normalize)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn reconcile_global_level(
     store: &PgStorage,
     level: &str,
 ) -> Result<String, KoraError> {
-    scalar_string(
-        store,
+    Ok(sqlx::query_scalar(
         r"UPDATE config SET compatibility_level = $1, updated_at = now()
           WHERE subject IS NULL
           RETURNING compatibility_level",
-        &binds![level],
     )
-    .await
+    .bind(level)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn set_subject_level(
@@ -68,36 +64,38 @@ pub(super) async fn set_subject_level(
     level: &str,
     normalize: bool,
 ) -> Result<String, KoraError> {
-    scalar_string(
-        store,
+    Ok(sqlx::query_scalar(
         r"INSERT INTO config (subject, compatibility_level, normalize)
           VALUES ($1, $2, $3)
           ON CONFLICT (subject) DO UPDATE SET compatibility_level = $2, normalize = $3, updated_at = now()
           RETURNING compatibility_level",
-        &binds![subject, level, normalize],
     )
-    .await
+    .bind(subject)
+    .bind(level)
+    .bind(normalize)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn get_global_normalize(store: &PgStorage) -> Result<bool, KoraError> {
-    scalar_bool(
-        store,
-        "SELECT COALESCE(normalize, false) FROM config WHERE subject IS NULL",
-        &[],
+    Ok(
+        sqlx::query_scalar("SELECT COALESCE(normalize, false) FROM config WHERE subject IS NULL")
+            .fetch_optional(store.pool())
+            .await?
+            .unwrap_or(false),
     )
-    .await
 }
 
 pub(super) async fn get_subject_normalize(
     store: &PgStorage,
     subject: &str,
 ) -> Result<Option<bool>, KoraError> {
-    scalar_opt_bool(
-        store,
+    Ok(sqlx::query_scalar(
         "SELECT COALESCE(normalize, false) FROM config WHERE subject = $1 AND compatibility_level IS NOT NULL",
-        &binds![subject],
     )
-    .await
+    .bind(subject)
+    .fetch_optional(store.pool())
+    .await?)
 }
 
 // -- Transactional operations --

@@ -1,11 +1,10 @@
-//! `PostgreSQL` storage backend — the default, fully-supported implementation.
+//! `PostgreSQL` storage backend.
 //!
-//! [`PgStorage`] holds a `sqlx` [`PgPool`] and implements [`Storage`] through the
-//! shared SQL toolkit (`crate::storage::sql`): it provides a [`SqlExecutor`] over
-//! its pool, then delegates each non-lifecycle `Storage` method to a per-domain
-//! module that owns the dialect `PostgreSQL` SQL. The handful of multi-statement
-//! transactional methods live in those domain modules too, as free functions that
-//! own the proven transaction logic.
+//! [`PgStorage`] holds a `sqlx` [`PgPool`] and implements [`Storage`] by
+//! delegating each non-lifecycle method to a per-domain module that owns the
+//! `PostgreSQL` SQL and talks to `sqlx` directly. The handful of
+//! multi-statement transactional methods live in those domain modules too, as
+//! free functions that own the proven transaction logic.
 
 pub mod compatibility;
 pub mod mode;
@@ -17,7 +16,6 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 
 use crate::error::KoraError;
-use crate::storage::sql::{Bind, Row, SqlExecutor};
 use crate::storage::types::{
     CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion,
 };
@@ -44,123 +42,36 @@ impl PgStorage {
     }
 }
 
-// -- SQL toolkit: row wrapper, executor, shared row mapper --
+// -- Shared query helpers --
 
-/// Wraps a `sqlx` [`PgRow`](sqlx::postgres::PgRow) so it can be decoded
-/// positionally through the backend-neutral [`Row`] trait.
-pub struct PgRowWrap(sqlx::postgres::PgRow);
+/// A row selecting `sc.id, sub.name, sv.version, sc.schema_type, sc.schema_text`
+/// (in that exact order), decoded positionally.
+pub(super) type SvRow = (i64, String, i32, String, String);
 
-impl Row for PgRowWrap {
-    fn get_i64(&self, idx: usize) -> Result<i64, KoraError> {
-        sqlx::Row::try_get::<i64, _>(&self.0, idx)
-            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
-    }
-
-    fn get_i32(&self, idx: usize) -> Result<i32, KoraError> {
-        sqlx::Row::try_get::<i32, _>(&self.0, idx)
-            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
-    }
-
-    fn get_str(&self, idx: usize) -> Result<String, KoraError> {
-        sqlx::Row::try_get::<String, _>(&self.0, idx)
-            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
-    }
-
-    fn get_bool(&self, idx: usize) -> Result<bool, KoraError> {
-        sqlx::Row::try_get::<bool, _>(&self.0, idx)
-            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
-    }
-
-    fn get_opt_i64(&self, idx: usize) -> Result<Option<i64>, KoraError> {
-        sqlx::Row::try_get::<Option<i64>, _>(&self.0, idx)
-            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
-    }
-
-    fn get_opt_str(&self, idx: usize) -> Result<Option<String>, KoraError> {
-        sqlx::Row::try_get::<Option<String>, _>(&self.0, idx)
-            .map_err(|e| KoraError::BackendDataStore(e.to_string()))
-    }
-}
-
-#[async_trait]
-impl SqlExecutor for PgStorage {
-    type Row = PgRowWrap;
-
-    async fn fetch_all(&self, sql: &str, params: &[Bind]) -> Result<Vec<PgRowWrap>, KoraError> {
-        // SAFETY (sqlx 0.9 `SqlSafeStr`): every caller builds `sql` from hardcoded
-        // literals plus interpolated internal/typed values (filter literals, inlined
-        // i64 id lists); all input-derived values are passed as binds, never spliced.
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
-        for b in params {
-            q = match b {
-                Bind::Str(s) => q.bind(s.as_str()),
-                Bind::I64(i) => q.bind(*i),
-                Bind::Bool(v) => q.bind(*v),
-            };
-        }
-        Ok(q.fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(PgRowWrap)
-            .collect())
-    }
-
-    async fn fetch_optional(
-        &self,
-        sql: &str,
-        params: &[Bind],
-    ) -> Result<Option<PgRowWrap>, KoraError> {
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
-        for b in params {
-            q = match b {
-                Bind::Str(s) => q.bind(s.as_str()),
-                Bind::I64(i) => q.bind(*i),
-                Bind::Bool(v) => q.bind(*v),
-            };
-        }
-        Ok(q.fetch_optional(&self.pool).await?.map(PgRowWrap))
-    }
-
-    async fn execute(&self, sql: &str, params: &[Bind]) -> Result<u64, KoraError> {
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
-        for b in params {
-            q = match b {
-                Bind::Str(s) => q.bind(s.as_str()),
-                Bind::I64(i) => q.bind(*i),
-                Bind::Bool(v) => q.bind(*v),
-            };
-        }
-        Ok(q.execute(&self.pool).await?.rows_affected())
-    }
-
-    async fn fetch_all_paged(
-        &self,
-        base_sql: &str,
-        params: &[Bind],
-        offset: i64,
-        limit: i64,
-    ) -> Result<Vec<PgRowWrap>, KoraError> {
-        let off = offset.max(0);
-        let sql = if limit < 0 {
-            format!("{base_sql} OFFSET {off}")
-        } else {
-            format!("{base_sql} OFFSET {off} LIMIT {limit}")
-        };
-        self.fetch_all(&sql, params).await
-    }
-}
-
-/// Map a row selecting `sc.id, sub.name, sv.version, sc.schema_type, sc.schema_text`
-/// (in that exact order) to a [`SchemaVersion`].
-pub(super) fn row_to_sv(r: &PgRowWrap) -> Result<SchemaVersion, KoraError> {
-    Ok(SchemaVersion {
-        id: r.get_i64(0)?,
-        subject: r.get_str(1)?,
-        version: r.get_i32(2)?,
-        schema_type: r.get_str(3)?,
-        schema: r.get_str(4)?,
+/// Map an [`SvRow`] to a [`SchemaVersion`] (references left empty — the caller
+/// loads them separately).
+pub(super) fn sv_from_row((id, subject, version, schema_type, schema): SvRow) -> SchemaVersion {
+    SchemaVersion {
+        id,
+        subject,
+        version,
+        schema_type,
+        schema,
         references: Vec::new(),
-    })
+    }
+}
+
+/// Window an ordered `SELECT` to `[offset, offset+limit)`; `limit < 0` means
+/// unbounded. `base_sql` must be a complete, ordered `SELECT` **without** a
+/// trailing `OFFSET`/`LIMIT` clause. The interpolated values are internal
+/// `i64`s, so the result stays safe to run via `AssertSqlSafe`.
+pub(super) fn paged(base_sql: &str, offset: i64, limit: i64) -> String {
+    let off = offset.max(0);
+    if limit < 0 {
+        format!("{base_sql} OFFSET {off}")
+    } else {
+        format!("{base_sql} OFFSET {off} LIMIT {limit}")
+    }
 }
 
 /// Escape LIKE metacharacters and append `%`, mirroring the sibling modules.
