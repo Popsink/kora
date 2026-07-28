@@ -47,9 +47,6 @@ fn load_uses_database_url_env_when_set() {
 #[test]
 fn load_composes_database_url_from_components() {
     Jail::expect_with(|jail| {
-        // Pin the backend so an ambient DB_BACKEND (e.g. the Oracle CI job) does
-        // not change which URL is composed.
-        jail.set_env("DB_BACKEND", "postgres");
         jail.set_env("DATABASE_URL", "");
         jail.set_env("DB_HOST", "pg.local");
         jail.set_env("DB_PORT", "6543");
@@ -70,9 +67,8 @@ fn load_composes_database_url_from_components() {
 #[test]
 fn load_errors_when_neither_url_nor_components_provided() {
     Jail::expect_with(|jail| {
-        // Hermetic: clear any ambient DB_* (e.g. from the Oracle CI job) so the
-        // "no URL, no components" error path is what is exercised.
-        jail.set_env("DB_BACKEND", "postgres");
+        // Hermetic: clear any ambient DB_* so the "no URL, no components" error
+        // path is what is exercised.
         jail.set_env("DATABASE_URL", "");
         jail.set_env("DB_HOST", "");
         jail.set_env("DB_USER", "");
