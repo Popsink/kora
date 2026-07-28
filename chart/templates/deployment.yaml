@@ -65,8 +65,6 @@ spec:
           securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.containerSecurityContext "context" $) | nindent 12 }}
           {{- end }}
           env:
-            - name: DB_BACKEND
-              value: {{ .Values.database.backend | quote }}
             {{- if eq (include "kora.databaseUrlMode" .) "true" }}
             - name: DATABASE_URL
               valueFrom:

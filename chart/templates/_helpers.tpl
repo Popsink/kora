@@ -1,10 +1,9 @@
 {{/*
 Return the proper Kora image name.
-The tag defaults to "v{appVersion}-{backend}" (e.g. v0.3.3-postgres or v0.3.3-oracle)
-so the image always matches database.backend; override image.tag to pin explicitly.
+The tag defaults to "v{appVersion}" (e.g. v0.5.0); override image.tag to pin explicitly.
 */}}
 {{- define "kora.image" -}}
-{{- $imageRoot := dict "registry" .Values.image.registry "repository" .Values.image.repository "tag" (.Values.image.tag | default (printf "v%s-%s" .Chart.AppVersion .Values.database.backend)) "digest" .Values.image.digest -}}
+{{- $imageRoot := dict "registry" .Values.image.registry "repository" .Values.image.repository "tag" (.Values.image.tag | default (printf "v%s" .Chart.AppVersion)) "digest" .Values.image.digest -}}
 {{ include "common.images.image" (dict "imageRoot" $imageRoot "global" .Values.global) }}
 {{- end -}}
 
