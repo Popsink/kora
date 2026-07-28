@@ -10,49 +10,18 @@ use crate::api::compatibility::COMPATIBILITY_LEVELS;
 
 // -- Types --
 
-/// Which database engine backs the registry.
-///
-/// `PostgreSQL` is the default and fully-supported engine. Oracle is additive
-/// and only available in binaries built with the `oracle` cargo feature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DbBackend {
-    /// `PostgreSQL` (default).
-    #[default]
-    Postgres,
-    /// Oracle Database.
-    Oracle,
-}
-
-impl DbBackend {
-    /// Parse a `DB_BACKEND` value (case-insensitive). `postgresql` aliases
-    /// `postgres`.
-    fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "postgres" | "postgresql" => Some(Self::Postgres),
-            "oracle" => Some(Self::Oracle),
-            _ => None,
-        }
-    }
-}
-
 /// Top-level configuration for the Kora server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct KoraConfig {
-    /// Which database engine to use. Resolved from `DB_BACKEND`, or inferred from
-    /// the `database_url` scheme (`oracle://` → Oracle), defaulting to `Postgres`.
-    #[serde(default)]
-    pub db_backend: DbBackend,
-    /// Database connection string. For `PostgreSQL`, a `postgres://` URL passed
-    /// straight to `sqlx`. For Oracle, an optional `oracle://user:pass@host:port/service`
-    /// URL parsed into the `db_*` components. If empty, composed from the
-    /// `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` components.
+    /// `PostgreSQL` connection string (`postgres://` URL passed straight to
+    /// `sqlx`). If empty, composed from the `DB_HOST` / `DB_PORT` / `DB_USER` /
+    /// `DB_PASSWORD` / `DB_NAME` components.
     #[serde(default)]
     pub database_url: String,
     /// Database host (used when `database_url` is empty).
     #[serde(default)]
     pub db_host: String,
-    /// Database port. Defaults to 5432 (`PostgreSQL`) or 1521 (Oracle).
+    /// Database port. Defaults to 5432.
     #[serde(default = "default_db_port")]
     pub db_port: u16,
     /// Database user.
@@ -61,7 +30,7 @@ pub struct KoraConfig {
     /// Database password.
     #[serde(default)]
     pub db_password: String,
-    /// Database name (`PostgreSQL`) or service name (Oracle).
+    /// Database name.
     #[serde(default)]
     pub db_name: String,
     /// Host address to bind the server to.
@@ -91,7 +60,6 @@ pub struct KoraConfig {
 impl Default for KoraConfig {
     fn default() -> Self {
         Self {
-            db_backend: DbBackend::default(),
             database_url: String::new(),
             db_host: String::new(),
             db_port: default_db_port(),
@@ -110,23 +78,21 @@ impl Default for KoraConfig {
 impl KoraConfig {
     /// Load configuration from defaults and environment variables.
     ///
-    /// Recognized env vars: `DB_BACKEND`, `DATABASE_URL`, `DB_HOST`, `DB_PORT`,
-    /// `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `HOST`, `PORT`, `MAX_BODY_SIZE`,
-    /// `DB_POOL_MAX`, `DEFAULT_COMPATIBILITY`.
+    /// Recognized env vars: `DATABASE_URL`, `DB_HOST`, `DB_PORT`, `DB_USER`,
+    /// `DB_PASSWORD`, `DB_NAME`, `HOST`, `PORT`, `MAX_BODY_SIZE`, `DB_POOL_MAX`,
+    /// `DEFAULT_COMPATIBILITY`.
     ///
-    /// The backend is taken from `DB_BACKEND` if set, otherwise inferred from the
-    /// `database_url` scheme (`oracle://` → Oracle), defaulting to `Postgres`.
-    /// For `PostgreSQL`, an empty `DATABASE_URL` is composed from the `DB_*`
-    /// components (user/password percent-encoded). For Oracle, an `oracle://` URL
-    /// is parsed into the `DB_*` components; otherwise the components are used
-    /// directly. A blank `DEFAULT_COMPATIBILITY` is treated as unset.
+    /// An empty `DATABASE_URL` is composed from the `DB_*` components
+    /// (user/password percent-encoded). A blank `DEFAULT_COMPATIBILITY` is
+    /// treated as unset.
     ///
     /// # Errors
     ///
-    /// Returns an error if values cannot be parsed, if `DB_BACKEND` is unknown,
-    /// if `DEFAULT_COMPATIBILITY` is not a known level, if an `oracle://` URL is
-    /// malformed, or if neither a connection URL nor a complete `DB_*` set
-    /// (`DB_HOST`, `DB_USER`, `DB_NAME`) is provided.
+    /// Returns an error if values cannot be parsed, if `DEFAULT_COMPATIBILITY`
+    /// is not a known level, if a removed Oracle selector is present
+    /// (`DB_BACKEND` set to anything but `postgres`, or an `oracle://` URL), or
+    /// if neither a connection URL nor a complete `DB_*` set (`DB_HOST`,
+    /// `DB_USER`, `DB_NAME`) is provided.
     pub fn load() -> Result<Self, Box<figment::Error>> {
         let mut cfg: Self = Figment::from(Serialized::defaults(Self::default()))
             .merge(Env::raw().only(&[
@@ -144,27 +110,37 @@ impl KoraConfig {
             .extract()
             .map_err(Box::new)?;
 
-        cfg.resolve_backend()?;
+        cfg.reject_removed_backend()?;
         cfg.resolve_default_compatibility()?;
-        cfg.resolve_connection()?;
+        cfg.resolve_postgres()?;
 
         Ok(cfg)
     }
 
-    /// Resolve [`DbBackend`] from `DB_BACKEND` or the URL scheme.
-    fn resolve_backend(&mut self) -> Result<(), Box<figment::Error>> {
-        if let Some(raw) = std::env::var("DB_BACKEND")
-            .ok()
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty())
-        {
-            self.db_backend = DbBackend::parse(&raw).ok_or_else(|| {
-                Box::new(figment::Error::from(format!(
-                    "DB_BACKEND is invalid: {raw}; must be one of: postgres, oracle"
-                )))
-            })?;
-        } else if self.database_url.starts_with("oracle:") {
-            self.db_backend = DbBackend::Oracle;
+    /// Fail fast on the removed Oracle backend selectors instead of silently
+    /// starting against `PostgreSQL`. `DB_BACKEND=postgres` (and `postgresql`)
+    /// is tolerated as a harmless legacy no-op so existing deployments keep
+    /// working.
+    fn reject_removed_backend(&self) -> Result<(), Box<figment::Error>> {
+        if let Ok(raw) = std::env::var("DB_BACKEND") {
+            let v = raw.trim();
+            if !v.is_empty()
+                && !v.eq_ignore_ascii_case("postgres")
+                && !v.eq_ignore_ascii_case("postgresql")
+            {
+                return Err(Box::new(figment::Error::from(format!(
+                    "DB_BACKEND is set to '{v}', but PostgreSQL is the only supported \
+                     backend (Oracle support was removed in favour of PostgreSQL); unset \
+                     DB_BACKEND and provide a postgres:// DATABASE_URL"
+                ))));
+            }
+        }
+        if self.database_url.starts_with("oracle:") {
+            return Err(Box::new(figment::Error::from(
+                "DATABASE_URL uses the removed oracle:// scheme (Oracle support was \
+                 removed); provide a postgres:// DSN instead"
+                    .to_owned(),
+            )));
         }
         Ok(())
     }
@@ -187,19 +163,6 @@ impl KoraConfig {
         Ok(())
     }
 
-    /// Normalise the connection details for the resolved backend.
-    fn resolve_connection(&mut self) -> Result<(), Box<figment::Error>> {
-        // When no DB_PORT was given, fall back to the engine's standard port.
-        if std::env::var("DB_PORT").is_err() && self.db_backend == DbBackend::Oracle {
-            self.db_port = default_oracle_port();
-        }
-
-        match self.db_backend {
-            DbBackend::Postgres => self.resolve_postgres(),
-            DbBackend::Oracle => self.resolve_oracle(),
-        }
-    }
-
     /// Compose a `postgres://` URL from components when none was provided.
     fn resolve_postgres(&mut self) -> Result<(), Box<figment::Error>> {
         if self.database_url.is_empty() {
@@ -213,59 +176,6 @@ impl KoraConfig {
                 self.db_name,
             );
         }
-        Ok(())
-    }
-
-    /// Parse an `oracle://` URL into components, or validate components directly.
-    /// The Oracle driver connects from these components (host/port/service +
-    /// user/password), so no URL is assembled.
-    fn resolve_oracle(&mut self) -> Result<(), Box<figment::Error>> {
-        if self.database_url.starts_with("oracle:") {
-            let url = self.database_url.clone();
-            self.apply_oracle_url(&url)?;
-        }
-        self.require_components()
-    }
-
-    /// Decompose an `oracle://user:pass@host:port/service` URL into `db_*`.
-    fn apply_oracle_url(&mut self, url: &str) -> Result<(), Box<figment::Error>> {
-        let rest = url
-            .strip_prefix("oracle://")
-            .or_else(|| url.strip_prefix("oracle:"))
-            .unwrap_or(url);
-
-        let (authority, service) = rest.split_once('/').ok_or_else(|| {
-            Box::new(figment::Error::from(
-                "oracle URL must include a service name: oracle://user:pass@host:port/service"
-                    .to_owned(),
-            ))
-        })?;
-
-        let (userinfo, hostport) = match authority.rsplit_once('@') {
-            Some((ui, hp)) => (Some(ui), hp),
-            None => (None, authority),
-        };
-
-        if let Some(ui) = userinfo {
-            let (user, pass) = ui.split_once(':').unwrap_or((ui, ""));
-            self.db_user = decode_component(user);
-            self.db_password = decode_component(pass);
-        }
-
-        let (host, port) = hostport
-            .rsplit_once(':')
-            .map_or((hostport, None), |(h, p)| (h, Some(p)));
-        if !host.is_empty() {
-            host.clone_into(&mut self.db_host);
-        }
-        if let Some(p) = port {
-            self.db_port = p.parse().map_err(|_| {
-                Box::new(figment::Error::from(format!(
-                    "oracle URL has an invalid port: {p}"
-                )))
-            })?;
-        }
-        service.clone_into(&mut self.db_name);
         Ok(())
     }
 
@@ -293,11 +203,6 @@ impl KoraConfig {
 
 // -- Helpers --
 
-/// Percent-decode a URL component, falling back to the raw value on error.
-fn decode_component(s: &str) -> String {
-    urlencoding::decode(s).map_or_else(|_| s.to_owned(), std::borrow::Cow::into_owned)
-}
-
 fn default_host() -> String {
     "0.0.0.0".to_owned()
 }
@@ -308,10 +213,6 @@ fn default_port() -> u16 {
 
 fn default_db_port() -> u16 {
     5432
-}
-
-fn default_oracle_port() -> u16 {
-    1521
 }
 
 fn default_max_body_size() -> usize {

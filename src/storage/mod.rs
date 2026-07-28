@@ -1,10 +1,9 @@
 //! Storage layer.
 //!
 //! The HTTP layer talks to the database exclusively through the [`Storage`]
-//! trait, never to a concrete pool, so the backing store is selectable per
-//! deployment. [`PgStorage`] is the default, fully-supported `PostgreSQL`
-//! implementation; [`OracleStorage`] (behind the `oracle` cargo feature) is the
-//! Oracle implementation. The wire API stays Confluent-compatible regardless.
+//! trait, never to a concrete pool. [`PgStorage`] is the `PostgreSQL`
+//! implementation — the only backing store. The wire API stays
+//! Confluent-compatible regardless.
 //!
 //! All trait methods return [`KoraError`] so handlers stay backend-agnostic; a
 //! driver error becomes [`KoraError::BackendDataStore`].
@@ -20,7 +19,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-use crate::config::{DbBackend, KoraConfig};
+use crate::config::KoraConfig;
 use crate::error::KoraError;
 use crate::types::SchemaReference;
 use types::{CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion};
@@ -50,13 +49,6 @@ pub enum StorageInitError {
     /// The database could not be reached or initialised.
     #[error("failed to initialise storage backend: {0}")]
     Backend(String),
-    /// `DB_BACKEND=oracle` (or an `oracle://` URL) was selected, but this binary
-    /// was compiled without the `oracle` cargo feature.
-    #[error(
-        "Oracle backend selected but this binary was built without the `oracle` feature; \
-         rebuild with `--features oracle`"
-    )]
-    OracleFeatureDisabled,
 }
 
 // -- Trait --
@@ -546,8 +538,7 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Find references for many content IDs in a single query, returned as
     /// `(content_id, reference)` pairs. Used by listings to avoid an N+1 (one
-    /// reference query per listed schema), which both adds latency and, on Oracle,
-    /// churns pooled connections under concurrent listings.
+    /// reference query per listed schema).
     ///
     /// # Errors
     ///
@@ -581,47 +572,19 @@ pub trait Storage: Send + Sync + 'static {
 
 // -- Factory --
 
-/// Connect to the configured backing store and return a shared handle.
+/// Connect to the backing `PostgreSQL` database and return a shared handle.
 ///
-/// Selects the backend from [`KoraConfig::db_backend`]. The returned handle has
-/// an open connection pool but migrations are not yet applied — call
-/// [`Storage::migrate`] next.
+/// The returned handle has an open connection pool but migrations are not yet
+/// applied — call [`Storage::migrate`] next.
 ///
 /// # Errors
 ///
-/// Returns [`StorageInitError`] if the database is unreachable, or if the Oracle
-/// backend is selected in a binary built without the `oracle` feature.
+/// Returns [`StorageInitError`] if the database is unreachable.
 pub async fn connect(cfg: &KoraConfig) -> Result<DynStorage, StorageInitError> {
-    match cfg.db_backend {
-        DbBackend::Postgres => {
-            let pool = pg_connect(&cfg.database_url, cfg.db_pool_max)
-                .await
-                .map_err(|e| StorageInitError::Backend(e.to_string()))?;
-            Ok(Arc::new(PgStorage::new(pool)))
-        }
-        DbBackend::Oracle => connect_oracle(cfg).await,
-    }
-}
-
-#[cfg(feature = "oracle")]
-async fn connect_oracle(cfg: &KoraConfig) -> Result<DynStorage, StorageInitError> {
-    let store = backends::OracleStorage::connect(
-        &cfg.db_host,
-        cfg.db_port,
-        &cfg.db_name,
-        &cfg.db_user,
-        &cfg.db_password,
-        cfg.db_pool_max,
-    )
-    .await
-    .map_err(|e| StorageInitError::Backend(e.to_string()))?;
-    Ok(Arc::new(store))
-}
-
-#[cfg(not(feature = "oracle"))]
-#[allow(clippy::unused_async)]
-async fn connect_oracle(_cfg: &KoraConfig) -> Result<DynStorage, StorageInitError> {
-    Err(StorageInitError::OracleFeatureDisabled)
+    let pool = pg_connect(&cfg.database_url, cfg.db_pool_max)
+        .await
+        .map_err(|e| StorageInitError::Backend(e.to_string()))?;
+    Ok(Arc::new(PgStorage::new(pool)))
 }
 
 // -- Postgres pool helpers --

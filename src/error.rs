@@ -94,13 +94,6 @@ impl From<sqlx::Error> for KoraError {
     }
 }
 
-#[cfg(feature = "oracle")]
-impl From<oracle::Error> for KoraError {
-    fn from(err: oracle::Error) -> Self {
-        Self::BackendDataStore(err.to_string())
-    }
-}
-
 impl KoraError {
     /// Confluent numeric error code.
     const fn error_code(&self) -> u32 {
