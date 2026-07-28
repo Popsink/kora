@@ -47,5 +47,5 @@ strip = true
 [dev-dependencies]
 figment = { version = "0.10.19", features = ["env", "test"] }
 reqwest = { version = "0.13.4", features = ["json"] }
-serial_test = { version = "3.5.0", features = ["file_locks"] }
+serial_test = { version = "4.0.1", features = ["file_locks"] }
 tokio-test = "0.4.5"
