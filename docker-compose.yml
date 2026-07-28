@@ -15,22 +15,3 @@ services:
       interval: 2s
       timeout: 3s
       retries: 10
-
-  # Oracle backend for local testing (`just test-oracle`). Behind a profile so the
-  # default `docker compose up` keeps starting only Postgres.
-  oracle:
-    container_name: oracle
-    image: gvenzl/oracle-free:slim
-    profiles: ["oracle"]
-    environment:
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-oracle}
-      APP_USER: ${DB_USER:-kora}
-      APP_USER_PASSWORD: ${DB_PASSWORD:-kora}
-    ports:
-      - "${ORACLE_PORT:-1521}:1521"
-    healthcheck:
-      test: ["CMD", "healthcheck.sh"]
-      interval: 10s
-      timeout: 5s
-      retries: 40
-      start_period: 90s
