@@ -11,28 +11,6 @@ ensure-pg:
       echo "Waiting for PG..."; until {{ pg_ready }}; do sleep 0.3; done; }
     @until {{ db_ready }}; do sleep 0.3; done
 
-# The `oracle` crate is a thick ODPI-C driver: the Oracle Instant Client must be
-# on the loader path at runtime. This project ships it via devbox (see devbox.json
-# + rust-toolchain.toml) — enter the env with `direnv allow` (auto) or `devbox run …`.
-# NOTE: on macOS, just execs recipes via /usr/bin/env, which SIP-strips DYLD_* — so
-# the value exported by devbox's init_hook is gone here. We rebuild the loader path
-# from DEVBOX_PACKAGES_DIR (a plain var, which survives) in `ic-loader-path`.
-ic-loader-path := if env('DEVBOX_PACKAGES_DIR', '') != '' { env('DEVBOX_PACKAGES_DIR') + "/lib" } else { '' }
-
-[private]
-check-instantclient:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    IFS=':' read -ra dirs <<< "{{ ic-loader-path }}:${DYLD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
-    for d in "${dirs[@]}"; do
-      [ -n "$d" ] && ls "$d"/libclntsh.* >/dev/null 2>&1 && exit 0
-    done
-    echo "Oracle Instant Client not on the loader path (the 'oracle' backend can't load its driver)." >&2
-    echo "This project provides it via devbox. Enter the env, then re-run:" >&2
-    echo "  direnv allow                    # if you use direnv (auto-activates on cd)" >&2
-    echo "  devbox run just test oracle     # otherwise, run through devbox" >&2
-    exit 1
-
 # ---------- Quality ----------
 
 # Check formatting
@@ -62,47 +40,20 @@ dev:
     trap 'docker compose rm -sf postgres >/dev/null 2>&1 || true' EXIT
     cargo run
 
-# Run the integration suite. Postgres by default; for Oracle: just test oracle
+# Run the integration suite
 [group('dev')]
-test db="postgres":
+test:
     #!/usr/bin/env bash
     set -euo pipefail
-    case "{{ db }}" in
-      postgres)
-        if [ "${CI:-}" = "true" ]; then
-          echo "CI — PG managed by service container"
-        elif pg_isready -h localhost -q 2>/dev/null; then
-          echo "PG already running — skipping docker compose"
-        else
-          just ensure-pg
-          trap 'docker compose rm -sf postgres >/dev/null 2>&1 || true' EXIT
-        fi
-        cargo test --test '*' -- --include-ignored
-        ;;
-      oracle)
-        just check-instantclient   # fail fast (before the slow Oracle boot) if IC isn't on the loader path
-        # Start a clean Oracle Free (down -v first so a stale/half-booted instance
-        # can't trip ORA-00600 ksipc), and tear it down on exit. Shares port 1521
-        # with the loadtest Oracle — stop that first (`just loadtest-stop`).
-        docker compose --profile oracle down -v >/dev/null 2>&1 || true
-        docker compose --profile oracle up -d oracle
-        echo "Waiting for Oracle (first boot is slow)..."
-        until docker compose exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
-        trap 'docker compose --profile oracle down -v' EXIT
-        # Put the devbox-provided Instant Client on the loader path (see note on
-        # check-instantclient re: SIP stripping DYLD_* from the recipe env).
-        export DYLD_LIBRARY_PATH="{{ ic-loader-path }}:${DYLD_LIBRARY_PATH:-}"
-        export LD_LIBRARY_PATH="{{ ic-loader-path }}:${LD_LIBRARY_PATH:-}"
-        DB_BACKEND=oracle DB_HOST=localhost DB_PORT="${ORACLE_PORT:-1521}" \
-          DB_USER="${DB_USER:-kora}" DB_PASSWORD="${DB_PASSWORD:-kora}" DB_NAME=FREEPDB1 \
-          DATABASE_URL= DB_POOL_MAX="${DB_POOL_MAX:-2}" \
-          cargo test --features oracle --test '*' -- --include-ignored --test-threads="${TEST_THREADS:-2}"
-        ;;
-      *)
-        echo "unknown backend '{{ db }}' — pass it positionally, e.g. 'just test oracle' (omit for postgres)" >&2
-        exit 2
-        ;;
-    esac
+    if [ "${CI:-}" = "true" ]; then
+      echo "CI — PG managed by service container"
+    elif pg_isready -h localhost -q 2>/dev/null; then
+      echo "PG already running — skipping docker compose"
+    else
+      just ensure-pg
+      trap 'docker compose rm -sf postgres >/dev/null 2>&1 || true' EXIT
+    fi
+    cargo test --test '*' -- --include-ignored
 
 # fmt + lint + test (CI entrypoint)
 [group('quality')]
@@ -110,16 +61,10 @@ ci: fmt lint test
 
 # ---------- Build & Push ----------
 
-# Build + push the PostgreSQL image (static musl, amd64 + arm64)
+# Build + push the image (static musl, amd64 + arm64)
 [group('build')]
-build tag="latest-postgres":
+build tag="latest":
     docker buildx build --platform {{ platforms }} --provenance=false -f dockerfiles/postgres.Dockerfile -t {{ image }}:{{ tag }} --push .
-
-# Build + push the Oracle image (glibc + Instant Client), multi-arch. For a quick
-# LOCAL build use: docker build -f dockerfiles/oracle.Dockerfile -t kora:oracle .
-[group('build')]
-build-oracle tag="latest-oracle":
-    docker buildx build --platform {{ platforms }} --provenance=false -f dockerfiles/oracle.Dockerfile -t {{ image }}:{{ tag }} --push .
 
 # ---------- Load testing ----------
 
@@ -133,106 +78,66 @@ ensure-loadtest-pg:
       echo "Waiting for load test PG..."; until {{ loadtest_pg_ready }}; do sleep 0.3; done; }
     @{{ loadtest_pg }} exec -T postgres psql -U kora -d kora_loadtest -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" > /dev/null 2>&1 || true
 
+# Run a k6 scenario: starts the DB + Kora, tears down after
 [private]
-ensure-loadtest-oracle:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    {{ loadtest_pg }} --profile oracle up -d oracle
-    echo "Waiting for load test Oracle to become healthy (each run boots a fresh DB — can take 2-4 min; do not interrupt)..."
-    until {{ loadtest_pg }} exec -T oracle healthcheck.sh > /dev/null 2>&1; do sleep 2; done
-    echo "Oracle ready."
-
-# Run a k6 scenario against `backend` (postgres|oracle): starts the DB + Kora, tears down after
-[private]
-loadtest-run scenario backend="postgres" *k6args:
+loadtest-run scenario *k6args:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Pick the database, build features, and connection env per backend.
-    case "{{ backend }}" in
-      postgres)
-        just ensure-loadtest-pg
-        cargo build --quiet
-        export DATABASE_URL="{{ loadtest_db }}"
-        ;;
-      oracle)
-        just check-instantclient   # Kora runs natively here too → needs IC on the loader path
-        just ensure-loadtest-oracle
-        export DYLD_LIBRARY_PATH="{{ ic-loader-path }}:${DYLD_LIBRARY_PATH:-}"
-        export LD_LIBRARY_PATH="{{ ic-loader-path }}:${LD_LIBRARY_PATH:-}"
-        cargo build --quiet --features oracle
-        export DB_BACKEND=oracle DB_HOST=localhost DB_PORT=1521 \
-          DB_USER=kora DB_PASSWORD=kora DB_NAME=FREEPDB1 DATABASE_URL=""
-        ;;
-      *)
-        echo "unknown backend '{{ backend }}' — pass it positionally, e.g. 'just stress oracle' (omit for postgres)" >&2
-        exit 2
-        ;;
-    esac
+    just ensure-loadtest-pg
+    cargo build --quiet
+    export DATABASE_URL="{{ loadtest_db }}"
 
     # Start Kora in background.
     DB_POOL_MAX=${DB_POOL_MAX:-20} ./target/debug/kora &
     KORA_PID=$!
     trap 'kill $KORA_PID 2>/dev/null; wait $KORA_PID 2>/dev/null' EXIT
 
-    echo "Waiting for Kora ({{ backend }})..."
+    echo "Waiting for Kora..."
     until curl -sf http://localhost:8080/health > /dev/null 2>&1; do sleep 0.2; done
-    echo "Kora ready — running {{ scenario }} against {{ backend }}"
+    echo "Kora ready — running {{ scenario }}"
 
     k6 run -e KORA_URL=http://localhost:8080 {{ k6args }} loadtest/scenarios/{{ scenario }}
 
-# Quick baseline — 1 VU, 30s. Postgres by default; for Oracle: just smoke oracle
+# Quick baseline — 1 VU, 30s
 [group('loadtest')]
-smoke db="postgres":
-    just loadtest-run smoke.js {{ db }}
+smoke:
+    just loadtest-run smoke.js
 
-# Nominal production load — 5min. Postgres by default; for Oracle: just load oracle
+# Nominal production load — 5min
 [group('loadtest')]
-load db="postgres":
-    just loadtest-run load.js {{ db }}
+load:
+    just loadtest-run load.js
 
-# Find the breaking point — ramp to 300 VUs. Postgres by default; for Oracle: just stress oracle
+# Find the breaking point — ramp to 300 VUs
 [group('loadtest')]
-stress db="postgres":
-    just loadtest-run stress.js {{ db }}
+stress:
+    just loadtest-run stress.js
 
-# Long-running accumulation — 2h, override K6_SOAK_DURATION. Postgres by default; for Oracle: just soak oracle
+# Long-running accumulation — 2h, override K6_SOAK_DURATION
 [group('loadtest')]
-soak db="postgres":
-    just loadtest-run soak.js {{ db }} --out csv=loadtest/soak-results.csv
+soak:
+    just loadtest-run soak.js --out csv=loadtest/soak-results.csv
 
-# FOR UPDATE lock contention — single subject. Postgres by default; for Oracle: just contention oracle
+# FOR UPDATE lock contention — single subject
 [group('loadtest')]
-contention db="postgres":
-    just loadtest-run contention.js {{ db }}
+contention:
+    just loadtest-run contention.js
 
-# Delete under concurrent writes. Postgres by default; for Oracle: just delete-load oracle
+# Delete under concurrent writes
 [group('loadtest')]
-delete-load db="postgres":
-    just loadtest-run delete-under-load.js {{ db }}
+delete-load:
+    just loadtest-run delete-under-load.js
 
-# DB monitoring, in another terminal DURING a load test. Postgres by default; for Oracle: just monitor oracle
+# DB monitoring, in another terminal DURING a load test
 [group('loadtest')]
-monitor db="postgres":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "{{ db }}" in
-      postgres)
-        {{ loadtest_pg }} exec -T postgres psql -U kora -d kora_loadtest -f /dev/stdin < loadtest/pg-monitor.sql
-        ;;
-      oracle)
-        {{ loadtest_pg }} exec -T oracle sqlplus -s system/oracle@localhost:1521/FREEPDB1 < loadtest/oracle-monitor.sql
-        ;;
-      *)
-        echo "unknown backend '{{ db }}' — pass it positionally, e.g. 'just monitor oracle' (omit for postgres)" >&2
-        exit 2
-        ;;
-    esac
+monitor:
+    {{ loadtest_pg }} exec -T postgres psql -U kora -d kora_loadtest -f /dev/stdin < loadtest/pg-monitor.sql
 
-# Stop load test infrastructure (PG + Oracle) and wipe data
+# Stop load test infrastructure and wipe data
 [group('loadtest')]
 loadtest-stop:
-    {{ loadtest_pg }} --profile oracle down -v
+    {{ loadtest_pg }} down -v
 
 # ---------- Migration ----------
 
@@ -261,7 +166,7 @@ migrate-verify:
 # Run image locally (needs DATABASE_URL)
 [group('docker')]
 run db_url:
-    docker run --rm --network host --name kora -e "DATABASE_URL={{ db_url }}" {{ image }}:latest-postgres
+    docker run --rm --network host --name kora -e "DATABASE_URL={{ db_url }}" {{ image }}:latest
 
 # Stop Kora and compose services
 [group('docker')]
@@ -273,5 +178,5 @@ stop:
 [group('docker')]
 clean:
     -docker rm -f kora
-    -docker rmi {{ image }}:latest-postgres
+    -docker rmi {{ image }}:latest
     -docker compose down -v

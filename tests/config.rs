@@ -47,9 +47,6 @@ fn load_uses_database_url_env_when_set() {
 #[test]
 fn load_composes_database_url_from_components() {
     Jail::expect_with(|jail| {
-        // Pin the backend so an ambient DB_BACKEND (e.g. the Oracle CI job) does
-        // not change which URL is composed.
-        jail.set_env("DB_BACKEND", "postgres");
         jail.set_env("DATABASE_URL", "");
         jail.set_env("DB_HOST", "pg.local");
         jail.set_env("DB_PORT", "6543");
@@ -70,9 +67,8 @@ fn load_composes_database_url_from_components() {
 #[test]
 fn load_errors_when_neither_url_nor_components_provided() {
     Jail::expect_with(|jail| {
-        // Hermetic: clear any ambient DB_* (e.g. from the Oracle CI job) so the
-        // "no URL, no components" error path is what is exercised.
-        jail.set_env("DB_BACKEND", "postgres");
+        // Hermetic: clear any ambient DB_* so the "no URL, no components" error
+        // path is what is exercised.
         jail.set_env("DATABASE_URL", "");
         jail.set_env("DB_HOST", "");
         jail.set_env("DB_USER", "");
@@ -82,6 +78,48 @@ fn load_errors_when_neither_url_nor_components_provided() {
 
         assert!(msg.contains("DATABASE_URL"), "{msg}");
         assert!(msg.contains("DB_HOST"), "{msg}");
+        Ok(())
+    });
+}
+
+#[test]
+fn load_rejects_oracle_url_with_actionable_error() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "oracle://kora:secret@db-host:1521/FREEPDB1");
+
+        let err = KoraConfig::load().expect_err("oracle:// URL should fail load");
+        let msg = err.to_string();
+
+        assert!(msg.contains("oracle://"), "{msg}");
+        assert!(msg.contains("postgres://"), "{msg}");
+        Ok(())
+    });
+}
+
+#[test]
+fn load_rejects_oracle_db_backend_with_actionable_error() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DB_BACKEND", "oracle");
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+
+        let err = KoraConfig::load().expect_err("DB_BACKEND=oracle should fail load");
+        let msg = err.to_string();
+
+        assert!(msg.contains("DB_BACKEND"), "{msg}");
+        assert!(msg.contains("PostgreSQL"), "{msg}");
+        Ok(())
+    });
+}
+
+#[test]
+fn load_tolerates_legacy_postgres_db_backend() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DB_BACKEND", "postgres");
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+
+        let cfg = KoraConfig::load().expect("DB_BACKEND=postgres should stay a no-op");
+
+        assert_eq!(cfg.database_url, "postgres://from-env/db");
         Ok(())
     });
 }

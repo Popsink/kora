@@ -7,8 +7,8 @@
 # The Release PR is your "release button" — merge it when you want to publish.
 # On release: builds multi-arch Docker image + packages Helm chart, pushes both to GHCR.
 #
-# Each platform × variant is built on its own native runner to avoid QEMU emulation,
-# then merged into a single multi-arch manifest per variant.
+# Each platform is built on its own native runner to avoid QEMU emulation,
+# then merged into a single multi-arch manifest.
 
 name: Release
 
@@ -91,7 +91,7 @@ jobs:
           fi
 
   build:
-    name: Build (${{ matrix.variant }}, ${{ matrix.platform_pair }})
+    name: Build (${{ matrix.platform_pair }})
     needs: release-plz
     if: needs.release-plz.outputs.releases_created == 'true'
     permissions:
@@ -100,24 +100,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: postgres
-            dockerfile: dockerfiles/postgres.Dockerfile
-            platform: linux/amd64
+          - platform: linux/amd64
             platform_pair: linux-amd64
             runner: ubuntu-latest-8-cores
-          - variant: postgres
-            dockerfile: dockerfiles/postgres.Dockerfile
-            platform: linux/arm64
-            platform_pair: linux-arm64
-            runner: ubuntu-24.04-arm
-          - variant: oracle
-            dockerfile: dockerfiles/oracle.Dockerfile
-            platform: linux/amd64
-            platform_pair: linux-amd64
-            runner: ubuntu-latest-8-cores
-          - variant: oracle
-            dockerfile: dockerfiles/oracle.Dockerfile
-            platform: linux/arm64
+          - platform: linux/arm64
             platform_pair: linux-arm64
             runner: ubuntu-24.04-arm
 
@@ -141,13 +127,13 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: dockerfiles/postgres.Dockerfile
           platforms: ${{ matrix.platform }}
           push: true
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.platform_pair }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.platform_pair }}
+          cache-from: type=gha,scope=${{ matrix.platform_pair }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform_pair }}
 
       - name: Export digest
         run: |
@@ -158,32 +144,26 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.variant }}-${{ matrix.platform_pair }}
+          name: digest-${{ matrix.platform_pair }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge (${{ matrix.variant }})
+    name: Merge
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [release-plz, build]
     if: needs.build.result == 'success' && needs.release-plz.outputs.releases_created == 'true'
     permissions:
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: postgres
-          - variant: oracle
 
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: digest-${{ matrix.variant }}-*
+          pattern: digest-*
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@v4
@@ -195,15 +175,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The canonical tags are unsuffixed. The -postgres aliases keep existing
+      # pins working across the Oracle removal (#71); they resolve to the same
+      # digest and can be dropped in a later release once nothing references
+      # them.
       - name: Create and push multi-arch manifest
         env:
           VERSION: ${{ needs.release-plz.outputs.version }}
-          VARIANT: ${{ matrix.variant }}
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
-            -t ${{ env.IMAGE }}:v${VERSION}-${VARIANT} \
-            -t ${{ env.IMAGE }}:latest-${VARIANT} \
+            -t ${{ env.IMAGE }}:v${VERSION} \
+            -t ${{ env.IMAGE }}:latest \
+            -t ${{ env.IMAGE }}:v${VERSION}-postgres \
+            -t ${{ env.IMAGE }}:latest-postgres \
             $(printf '${{ env.IMAGE }}@sha256:%s ' *)
 
   helm:

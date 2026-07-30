@@ -86,37 +86,23 @@ pub fn database_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL must be set — run via `just test`")
 }
 
-/// True when the configured backend is Oracle. White-box tests that issue raw
-/// `PostgreSQL` SQL against [`pool`] guard on this and skip on Oracle; the
-/// black-box HTTP tests run against whichever backend is configured.
-pub fn backend_is_oracle() -> bool {
-    if std::env::var("DB_BACKEND").is_ok_and(|v| v.eq_ignore_ascii_case("oracle")) {
-        return true;
-    }
-    std::env::var("DATABASE_URL").is_ok_and(|v| v.starts_with("oracle:"))
-}
-
-/// Create a `PostgreSQL` pool with migrations applied — for `PostgreSQL`-specific
-/// white-box tests that query the schema directly.
+/// Create a `PostgreSQL` pool with migrations applied — for white-box tests
+/// that query the schema directly.
 pub async fn pool() -> sqlx::PgPool {
     kora::storage::create_pool(&database_url(), 10)
         .await
         .expect("database should be reachable")
 }
 
-/// Build the configured storage backend (Postgres or Oracle). Backend-agnostic —
-/// used by the black-box HTTP tests.
+/// Build the storage backend through the application path — used by the
+/// black-box HTTP tests.
 ///
 /// Each test gets its **own** pool: every `#[tokio::test]` runs on its own tokio
 /// runtime, and a `sqlx` pool is bound to the runtime that created it — sharing one
 /// pool across tests breaks once the creating test's runtime is dropped. A per-test
-/// pool sidesteps that for both backends. Migrations run **once per process**
-/// (guarded by [`MIGRATED`]): the schema is shared and cargo runs test binaries
-/// sequentially, so this avoids dozens of concurrent `migrate()` calls.
-///
-/// Oracle's thick driver serialises session-pool *creation* internally (see
-/// `OracleStorage::connect`), so many per-test pools no longer race on
-/// `OCISessionPoolCreate` (`ORA-24416`).
+/// pool sidesteps that. Migrations run **once per process** (guarded by
+/// [`MIGRATED`]): the schema is shared and cargo runs test binaries sequentially,
+/// so this avoids dozens of concurrent `migrate()` calls.
 pub async fn storage() -> kora::storage::DynStorage {
     let mut cfg = kora::config::KoraConfig::load().expect("config should load from env");
     // Each test spawns its own server (and pool); keep pools small so the parallel

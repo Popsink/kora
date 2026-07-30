@@ -3,23 +3,12 @@ name = "kora"
 version = "0.4.1"
 edition = "2024"
 
-[features]
-default = []
-# Compile the Oracle backing-store driver (`oracle://` / DB_BACKEND=oracle).
-# Off by default so the standard build stays minimal. Uses the mature `oracle`
-# crate (ODPI-C). An Oracle-enabled build is a glibc binary that loads Oracle
-# Instant Client at runtime — NOT the static-musl single binary of the default
-# Postgres build (see dockerfiles/oracle.Dockerfile). The driver is blocking; DB calls are
-# bridged onto tokio via spawn_blocking.
-oracle = ["dep:oracle"]
-
 [dependencies]
 apache-avro = "0.21.0"
 async-trait = "0.1.83"
 axum = { version = "0.8.9", features = ["macros"] }
 figment = { version = "0.10.19", features = ["env"] }
 hex = "0.4"
-oracle = { version = "0.6.3", optional = true }
 jsonschema = { version = "0.49.1", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"

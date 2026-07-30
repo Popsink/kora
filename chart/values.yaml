@@ -22,7 +22,7 @@ extraDeploy: []
 ## @section Image parameters
 ## @param image.registry Kora image registry
 ## @param image.repository Kora image repository
-## @param image.tag Kora image tag (defaults to "v{appVersion}-{database.backend}", e.g. v{appVersion}-postgres or v{appVersion}-oracle)
+## @param image.tag Kora image tag (defaults to "v{appVersion}")
 ## @param image.digest Kora image digest in sha256:aa... format (overrides tag)
 ## @param image.pullPolicy Kora image pull policy
 ## @param image.pullSecrets Kora image pull secrets
@@ -53,19 +53,17 @@ kora:
   extraEnvVarsCM: ""
   extraEnvVarsSecret: ""
 
-## @section Database parameters (external PostgreSQL or Oracle)
-## @param database.backend Backing store engine: "postgres" (default) or "oracle". The chart automatically selects the matching image (`-postgres` or `-oracle`, the latter glibc + bundled Oracle Instant Client); override `image.tag` only to pin explicitly.
+## @section Database parameters (external PostgreSQL)
 ## @param database.host Database host
-## @param database.port Database port (PostgreSQL 5432, Oracle 1521)
+## @param database.port Database port
 ## @param database.user Database user
-## @param database.database Database name (PostgreSQL) or service name (Oracle, e.g. FREEPDB1)
+## @param database.database Database name
 ## @param database.password Direct value for database password (used if database.existingSecret is not set)
-## @param database.url Direct value for the full connection URL (used if database.existingSecret is not set); takes priority over components. Oracle: oracle://user:pass@host:port/service
+## @param database.url Direct value for the full connection URL (used if database.existingSecret is not set); takes priority over components
 ## @param database.existingSecret Name of existing secret containing the database password or connection URL
 ## @param database.secretKeys.password Key name in the secret for the database password
 ## @param database.secretKeys.url Key name in the secret for the full connection URL; when set, takes priority over secretKeys.password
 database:
-  backend: "postgres"
   host: ""
   port: 5432
   user: "kora"

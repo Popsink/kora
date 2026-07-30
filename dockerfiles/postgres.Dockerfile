@@ -1,8 +1,6 @@
-# Kora — PostgreSQL image (default): static musl binary, multi-arch via xx.
+# Kora — static musl binary, multi-arch via xx.
 #   docker build -f dockerfiles/postgres.Dockerfile -t kora .      # local, native arch
 #   just build                                                     # multi-arch + push
-# The Oracle image lives in dockerfiles/oracle.Dockerfile (glibc + Instant Client).
-# The chart/CLI are identical across both; only the backend driver + base differ.
 
 # -- Cross-compilation helper (static musl via xx) --
 FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
@@ -18,9 +16,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY migrations/ migrations/
 
-# NOTE: do NOT build with --features oracle here — the `oracle` crate is a thick
-# ODPI-C driver needing glibc + Oracle Instant Client at runtime, so it cannot be
-# a static-musl binary. Build the Oracle image from dockerfiles/oracle.Dockerfile.
 ARG TARGETPLATFORM
 RUN xx-apk add --no-cache musl-dev zlib-dev zlib-static gcc
 RUN xx-cargo build --release --bin kora

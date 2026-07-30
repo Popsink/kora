@@ -137,32 +137,6 @@
         }
       }
     },
-    "oracle-instantclient@21.10.0.0.0": {
-      "last_modified": "2026-06-29T19:19:24Z",
-      "resolved": "github:NixOS/nixpkgs/7a1a64774a5fd0b0cd39ac95d0e170ace8b266a0#oracle-instantclient",
-      "source": "devbox-search",
-      "version": "21.10.0.0.0",
-      "systems": {
-        "x86_64-linux": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/hvf2dhrqd1d83hndvz2c0h7m9c7w1dhz-oracle-instantclient-21.10.0.0.0",
-              "default": true
-            },
-            {
-              "name": "dev",
-              "path": "/nix/store/5p54b4zgkjy8ksfkgp4z25hvf3hfb2bx-oracle-instantclient-21.10.0.0.0-dev"
-            },
-            {
-              "name": "lib",
-              "path": "/nix/store/7zqcykhxd1nz600wx2vymr4wg1ccif4g-oracle-instantclient-21.10.0.0.0-lib"
-            }
-          ],
-          "store_path": "/nix/store/hvf2dhrqd1d83hndvz2c0h7m9c7w1dhz-oracle-instantclient-21.10.0.0.0"
-        }
-      }
-    },
     "postgresql@17.10": {
       "last_modified": "2026-06-29T19:19:24Z",
       "plugin_version": "0.0.2",

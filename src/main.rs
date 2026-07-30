@@ -17,7 +17,6 @@ async fn main() {
     tracing::info!(
         host = %cfg.host,
         port = %cfg.port,
-        backend = ?cfg.db_backend,
         "starting Kora"
     );
 

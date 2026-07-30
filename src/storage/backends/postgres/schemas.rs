@@ -1,39 +1,36 @@
 //! Schema and version operations for the `PostgreSQL` backend.
 //!
-//! Simple reads run through the SQL toolkit and the shared [`row_to_sv`] mapper;
-//! the atomic registration path runs in a transaction over the raw
-//! [`PgPool`](sqlx::PgPool) and owns its dialect SQL (plus its private helpers)
-//! verbatim.
+//! Simple reads run single statements over the pool and decode through the
+//! shared [`SvRow`] tuple; the atomic registration path runs in a transaction
+//! over the raw [`PgPool`](sqlx::PgPool) and owns its SQL (plus its private
+//! helpers) verbatim.
 //!
-//! [`row_to_sv`]: super::row_to_sv
+//! [`SvRow`]: super::SvRow
 
-use crate::binds;
 use crate::error::KoraError;
-use crate::storage::sql::helpers::{fetch_strings, scalar_bool, scalar_opt_i64};
-use crate::storage::sql::{Row, SqlExecutor};
 use crate::storage::types::{CompatCheck, NewSchema, SchemaVersion, SubjectVersion};
 use crate::types::SchemaReference;
 
-use super::{PgStorage, like_pattern, row_to_sv};
+use super::{PgStorage, SvRow, like_pattern, paged, sv_from_row};
 
 pub(super) async fn find_all_active_versions(
     store: &PgStorage,
     subject: &str,
 ) -> Result<Vec<SchemaVersion>, KoraError> {
-    store
-        .fetch_all(
-            r"SELECT sc.id, sub.name, sv.version, sc.schema_type, sc.schema_text
-               FROM schema_versions sv
-               JOIN subjects sub ON sv.subject_id = sub.id
-               JOIN schema_contents sc ON sv.content_id = sc.id
-               WHERE sub.name = $1 AND sv.deleted = false
-               ORDER BY sv.version",
-            &binds![subject],
-        )
-        .await?
-        .iter()
-        .map(row_to_sv)
-        .collect()
+    Ok(sqlx::query_as::<_, SvRow>(
+        r"SELECT sc.id, sub.name, sv.version, sc.schema_type, sc.schema_text
+           FROM schema_versions sv
+           JOIN subjects sub ON sv.subject_id = sub.id
+           JOIN schema_contents sc ON sv.content_id = sc.id
+           WHERE sub.name = $1 AND sv.deleted = false
+           ORDER BY sv.version",
+    )
+    .bind(subject)
+    .fetch_all(store.pool())
+    .await?
+    .into_iter()
+    .map(sv_from_row)
+    .collect())
 }
 
 pub(super) async fn find_schema_by_subject_version(
@@ -55,10 +52,12 @@ pub(super) async fn find_schema_by_subject_version(
            JOIN schema_contents sc ON sv.content_id = sc.id
            WHERE sub.name = $1 AND sv.version = $2 AND sv.deleted = false"
     };
-    match store.fetch_optional(sql, &binds![subject, version]).await? {
-        Some(r) => Ok(Some(row_to_sv(&r)?)),
-        None => Ok(None),
-    }
+    Ok(sqlx::query_as::<_, SvRow>(sql)
+        .bind(subject)
+        .bind(version)
+        .fetch_optional(store.pool())
+        .await?
+        .map(sv_from_row))
 }
 
 pub(super) async fn find_latest_schema_by_subject(
@@ -81,10 +80,11 @@ pub(super) async fn find_latest_schema_by_subject(
            WHERE sub.name = $1 AND sv.deleted = false
            ORDER BY sv.version DESC LIMIT 1"
     };
-    match store.fetch_optional(sql, &binds![subject]).await? {
-        Some(r) => Ok(Some(row_to_sv(&r)?)),
-        None => Ok(None),
-    }
+    Ok(sqlx::query_as::<_, SvRow>(sql)
+        .bind(subject)
+        .fetch_optional(store.pool())
+        .await?
+        .map(sv_from_row))
 }
 
 pub(super) async fn find_schema_by_subject_id_and_fingerprint(
@@ -124,46 +124,42 @@ pub(super) async fn find_schema_by_subject_id_and_fingerprint(
                WHERE sv.subject_id = $1 AND sc.raw_fingerprint = $2 AND sv.deleted = false"
         }
     };
-    match store
-        .fetch_optional(sql, &binds![subject_id, fingerprint])
+    Ok(sqlx::query_as::<_, SvRow>(sql)
+        .bind(subject_id)
+        .bind(fingerprint)
+        .fetch_optional(store.pool())
         .await?
-    {
-        Some(r) => Ok(Some(row_to_sv(&r)?)),
-        None => Ok(None),
-    }
+        .map(sv_from_row))
 }
 
 pub(super) async fn find_schema_by_id(
     store: &PgStorage,
     id: i64,
 ) -> Result<Option<(String, String)>, KoraError> {
-    match store
-        .fetch_optional(
-            "SELECT schema_text, schema_type FROM schema_contents WHERE id = $1",
-            &binds![id],
-        )
-        .await?
-    {
-        Some(r) => Ok(Some((r.get_str(0)?, r.get_str(1)?))),
-        None => Ok(None),
-    }
+    Ok(sqlx::query_as::<_, (String, String)>(
+        "SELECT schema_text, schema_type FROM schema_contents WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(store.pool())
+    .await?)
 }
 
 pub(super) async fn find_max_schema_id(store: &PgStorage) -> Result<i64, KoraError> {
     Ok(
-        scalar_opt_i64(store, "SELECT MAX(id) FROM schema_contents", &[])
+        sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(id) FROM schema_contents")
+            .fetch_one(store.pool())
             .await?
             .unwrap_or(0),
     )
 }
 
 pub(super) async fn schema_exists(store: &PgStorage, id: i64) -> Result<bool, KoraError> {
-    scalar_bool(
-        store,
-        "SELECT EXISTS(SELECT 1 FROM schema_contents WHERE id = $1)",
-        &binds![id],
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_contents WHERE id = $1)")
+            .bind(id)
+            .fetch_one(store.pool())
+            .await?,
     )
-    .await
 }
 
 pub(super) async fn find_subjects_by_schema_id(
@@ -174,24 +170,36 @@ pub(super) async fn find_subjects_by_schema_id(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<String>, KoraError> {
+    // SAFETY (sqlx 0.9 `SqlSafeStr`): pagination interpolates internal i64s
+    // only; all values are bound.
     if let Some(filter) = subject_filter {
-        let sql = r"SELECT DISTINCT sub.name FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
+        let sql = paged(
+            r"SELECT DISTINCT sub.name FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sv.content_id = $1 AND (sv.deleted = false OR $2) AND (sub.deleted = false OR $2)
                  AND sub.name = $3
-               ORDER BY sub.name";
-        fetch_strings(
-            store,
-            sql,
-            &binds![id, include_deleted, filter],
+               ORDER BY sub.name",
             offset,
             limit,
-        )
-        .await
+        );
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .bind(include_deleted)
+            .bind(filter)
+            .fetch_all(store.pool())
+            .await?)
     } else {
-        let sql = r"SELECT DISTINCT sub.name FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
+        let sql = paged(
+            r"SELECT DISTINCT sub.name FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sv.content_id = $1 AND (sv.deleted = false OR $2) AND (sub.deleted = false OR $2)
-               ORDER BY sub.name";
-        fetch_strings(store, sql, &binds![id, include_deleted], offset, limit).await
+               ORDER BY sub.name",
+            offset,
+            limit,
+        );
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .bind(include_deleted)
+            .fetch_all(store.pool())
+            .await?)
     }
 }
 
@@ -203,32 +211,41 @@ pub(super) async fn find_versions_by_schema_id(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<SubjectVersion>, KoraError> {
-    let rows = if let Some(filter) = subject_filter {
-        let sql = r"SELECT sub.name, sv.version
+    let rows: Vec<(String, i32)> = if let Some(filter) = subject_filter {
+        let sql = paged(
+            r"SELECT sub.name, sv.version
                FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sv.content_id = $1 AND (sv.deleted = false OR $2) AND (sub.deleted = false OR $2)
                  AND sub.name = $3
-               ORDER BY sub.name, sv.version";
-        store
-            .fetch_all_paged(sql, &binds![id, include_deleted, filter], offset, limit)
+               ORDER BY sub.name, sv.version",
+            offset,
+            limit,
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .bind(include_deleted)
+            .bind(filter)
+            .fetch_all(store.pool())
             .await?
     } else {
-        let sql = r"SELECT sub.name, sv.version
+        let sql = paged(
+            r"SELECT sub.name, sv.version
                FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sv.content_id = $1 AND (sv.deleted = false OR $2) AND (sub.deleted = false OR $2)
-               ORDER BY sub.name, sv.version";
-        store
-            .fetch_all_paged(sql, &binds![id, include_deleted], offset, limit)
+               ORDER BY sub.name, sv.version",
+            offset,
+            limit,
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .bind(include_deleted)
+            .fetch_all(store.pool())
             .await?
     };
-    rows.iter()
-        .map(|r| {
-            Ok(SubjectVersion {
-                subject: r.get_str(0)?,
-                version: r.get_i32(1)?,
-            })
-        })
-        .collect()
+    Ok(rows
+        .into_iter()
+        .map(|(subject, version)| SubjectVersion { subject, version })
+        .collect())
 }
 
 pub(super) async fn list_schema_versions(
@@ -240,37 +257,57 @@ pub(super) async fn list_schema_versions(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<i32>, KoraError> {
-    let rows = if deleted_only && deleted_as_negative {
-        let sql = r"SELECT -sv.version AS version FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
+    if deleted_only && deleted_as_negative {
+        let sql = paged(
+            r"SELECT -sv.version AS version FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sub.name = $1 AND sv.deleted = true
-               ORDER BY sv.version";
-        store
-            .fetch_all_paged(sql, &binds![subject], offset, limit)
-            .await?
+               ORDER BY sv.version",
+            offset,
+            limit,
+        );
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(subject)
+            .fetch_all(store.pool())
+            .await?)
     } else if deleted_only {
-        let sql = r"SELECT sv.version FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
+        let sql = paged(
+            r"SELECT sv.version FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sub.name = $1 AND sv.deleted = true
-               ORDER BY sv.version";
-        store
-            .fetch_all_paged(sql, &binds![subject], offset, limit)
-            .await?
+               ORDER BY sv.version",
+            offset,
+            limit,
+        );
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(subject)
+            .fetch_all(store.pool())
+            .await?)
     } else if deleted_as_negative && include_deleted {
-        let sql = r"SELECT CASE WHEN sv.deleted THEN -sv.version ELSE sv.version END AS version
+        let sql = paged(
+            r"SELECT CASE WHEN sv.deleted THEN -sv.version ELSE sv.version END AS version
                FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sub.name = $1
-               ORDER BY abs(sv.version)";
-        store
-            .fetch_all_paged(sql, &binds![subject], offset, limit)
-            .await?
+               ORDER BY abs(sv.version)",
+            offset,
+            limit,
+        );
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(subject)
+            .fetch_all(store.pool())
+            .await?)
     } else {
-        let sql = r"SELECT sv.version FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
+        let sql = paged(
+            r"SELECT sv.version FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
                WHERE sub.name = $1 AND (sv.deleted = false OR $2)
-               ORDER BY sv.version";
-        store
-            .fetch_all_paged(sql, &binds![subject, include_deleted], offset, limit)
-            .await?
-    };
-    rows.iter().map(|r| r.get_i32(0)).collect()
+               ORDER BY sv.version",
+            offset,
+            limit,
+        );
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(subject)
+            .bind(include_deleted)
+            .fetch_all(store.pool())
+            .await?)
+    }
 }
 
 pub(super) async fn list_schemas(
@@ -282,81 +319,99 @@ pub(super) async fn list_schemas(
     limit: i64,
 ) -> Result<Vec<SchemaVersion>, KoraError> {
     let like = like_pattern(prefix);
-    let rows = match (latest_only, &like) {
+    let rows: Vec<SvRow> = match (latest_only, &like) {
         (true, Some(pat)) => {
-            let sql = r"SELECT DISTINCT ON (sub.name) sc.id, sub.name, sv.version,
-                     sc.schema_type, sc.schema_text
-               FROM schema_versions sv
-               JOIN subjects sub ON sv.subject_id = sub.id
-               JOIN schema_contents sc ON sv.content_id = sc.id
-               WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
-                 AND sub.name LIKE $2 ESCAPE '\'
-               ORDER BY sub.name, sv.version DESC";
-            store
-                .fetch_all_paged(sql, &binds![include_deleted, pat], offset, limit)
+            let sql = paged(
+                r"SELECT DISTINCT ON (sub.name) sc.id, sub.name, sv.version,
+                         sc.schema_type, sc.schema_text
+                   FROM schema_versions sv
+                   JOIN subjects sub ON sv.subject_id = sub.id
+                   JOIN schema_contents sc ON sv.content_id = sc.id
+                   WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
+                     AND sub.name LIKE $2 ESCAPE '\'
+                   ORDER BY sub.name, sv.version DESC",
+                offset,
+                limit,
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(include_deleted)
+                .bind(pat)
+                .fetch_all(store.pool())
                 .await?
         }
         (true, None) => {
-            let sql = r"SELECT DISTINCT ON (sub.name) sc.id, sub.name, sv.version,
-                     sc.schema_type, sc.schema_text
-               FROM schema_versions sv
-               JOIN subjects sub ON sv.subject_id = sub.id
-               JOIN schema_contents sc ON sv.content_id = sc.id
-               WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
-               ORDER BY sub.name, sv.version DESC";
-            store
-                .fetch_all_paged(sql, &binds![include_deleted], offset, limit)
+            let sql = paged(
+                r"SELECT DISTINCT ON (sub.name) sc.id, sub.name, sv.version,
+                         sc.schema_type, sc.schema_text
+                   FROM schema_versions sv
+                   JOIN subjects sub ON sv.subject_id = sub.id
+                   JOIN schema_contents sc ON sv.content_id = sc.id
+                   WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
+                   ORDER BY sub.name, sv.version DESC",
+                offset,
+                limit,
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(include_deleted)
+                .fetch_all(store.pool())
                 .await?
         }
         (false, Some(pat)) => {
-            let sql = r"SELECT sc.id, sub.name, sv.version,
-                     sc.schema_type, sc.schema_text
-               FROM schema_versions sv
-               JOIN subjects sub ON sv.subject_id = sub.id
-               JOIN schema_contents sc ON sv.content_id = sc.id
-               WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
-                 AND sub.name LIKE $2 ESCAPE '\'
-               ORDER BY sub.name, sv.version";
-            store
-                .fetch_all_paged(sql, &binds![include_deleted, pat], offset, limit)
+            let sql = paged(
+                r"SELECT sc.id, sub.name, sv.version,
+                         sc.schema_type, sc.schema_text
+                   FROM schema_versions sv
+                   JOIN subjects sub ON sv.subject_id = sub.id
+                   JOIN schema_contents sc ON sv.content_id = sc.id
+                   WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
+                     AND sub.name LIKE $2 ESCAPE '\'
+                   ORDER BY sub.name, sv.version",
+                offset,
+                limit,
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(include_deleted)
+                .bind(pat)
+                .fetch_all(store.pool())
                 .await?
         }
         (false, None) => {
-            let sql = r"SELECT sc.id, sub.name, sv.version,
-                     sc.schema_type, sc.schema_text
-               FROM schema_versions sv
-               JOIN subjects sub ON sv.subject_id = sub.id
-               JOIN schema_contents sc ON sv.content_id = sc.id
-               WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
-               ORDER BY sub.name, sv.version";
-            store
-                .fetch_all_paged(sql, &binds![include_deleted], offset, limit)
+            let sql = paged(
+                r"SELECT sc.id, sub.name, sv.version,
+                         sc.schema_type, sc.schema_text
+                   FROM schema_versions sv
+                   JOIN subjects sub ON sv.subject_id = sub.id
+                   JOIN schema_contents sc ON sv.content_id = sc.id
+                   WHERE (sv.deleted = false OR $1) AND (sub.deleted = false OR $1)
+                   ORDER BY sub.name, sv.version",
+                offset,
+                limit,
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(include_deleted)
+                .fetch_all(store.pool())
                 .await?
         }
     };
-    rows.iter().map(row_to_sv).collect()
+    Ok(rows.into_iter().map(sv_from_row).collect())
 }
 
 pub(super) async fn soft_delete_latest_schema(
     store: &PgStorage,
     subject: &str,
 ) -> Result<Option<i32>, KoraError> {
-    match store
-        .fetch_optional(
-            r"UPDATE schema_versions SET deleted = true
-               WHERE id = (
-                 SELECT sv.id FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
-                 WHERE sub.name = $1 AND sv.deleted = false
-                 ORDER BY sv.version DESC LIMIT 1
-               )
-               RETURNING version",
-            &binds![subject],
-        )
-        .await?
-    {
-        Some(r) => Ok(Some(r.get_i32(0)?)),
-        None => Ok(None),
-    }
+    Ok(sqlx::query_scalar(
+        r"UPDATE schema_versions SET deleted = true
+           WHERE id = (
+             SELECT sv.id FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
+             WHERE sub.name = $1 AND sv.deleted = false
+             ORDER BY sv.version DESC LIMIT 1
+           )
+           RETURNING version",
+    )
+    .bind(subject)
+    .fetch_optional(store.pool())
+    .await?)
 }
 
 pub(super) async fn soft_delete_schema_version(
@@ -364,19 +419,16 @@ pub(super) async fn soft_delete_schema_version(
     subject: &str,
     version: i32,
 ) -> Result<Option<i32>, KoraError> {
-    match store
-        .fetch_optional(
-            r"UPDATE schema_versions SET deleted = true
-               WHERE subject_id = (SELECT id FROM subjects WHERE name = $1)
-                 AND version = $2 AND deleted = false
-               RETURNING version",
-            &binds![subject, version],
-        )
-        .await?
-    {
-        Some(r) => Ok(Some(r.get_i32(0)?)),
-        None => Ok(None),
-    }
+    Ok(sqlx::query_scalar(
+        r"UPDATE schema_versions SET deleted = true
+           WHERE subject_id = (SELECT id FROM subjects WHERE name = $1)
+             AND version = $2 AND deleted = false
+           RETURNING version",
+    )
+    .bind(subject)
+    .bind(version)
+    .fetch_optional(store.pool())
+    .await?)
 }
 
 pub(super) async fn hard_delete_schema_version(
@@ -384,19 +436,16 @@ pub(super) async fn hard_delete_schema_version(
     subject: &str,
     version: i32,
 ) -> Result<Option<i32>, KoraError> {
-    match store
-        .fetch_optional(
-            r"DELETE FROM schema_versions
-               WHERE subject_id = (SELECT id FROM subjects WHERE name = $1)
-                 AND version = $2 AND deleted = true
-               RETURNING version",
-            &binds![subject, version],
-        )
-        .await?
-    {
-        Some(r) => Ok(Some(r.get_i32(0)?)),
-        None => Ok(None),
-    }
+    Ok(sqlx::query_scalar(
+        r"DELETE FROM schema_versions
+           WHERE subject_id = (SELECT id FROM subjects WHERE name = $1)
+             AND version = $2 AND deleted = true
+           RETURNING version",
+    )
+    .bind(subject)
+    .bind(version)
+    .fetch_optional(store.pool())
+    .await?)
 }
 
 pub(super) async fn version_is_soft_deleted(
@@ -404,15 +453,16 @@ pub(super) async fn version_is_soft_deleted(
     subject: &str,
     version: i32,
 ) -> Result<bool, KoraError> {
-    scalar_bool(
-        store,
+    Ok(sqlx::query_scalar(
         r"SELECT EXISTS(
             SELECT 1 FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
             WHERE sub.name = $1 AND sv.version = $2 AND sv.deleted = true
         )",
-        &binds![subject, version],
     )
-    .await
+    .bind(subject)
+    .bind(version)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub(super) async fn version_is_active(
@@ -420,22 +470,23 @@ pub(super) async fn version_is_active(
     subject: &str,
     version: i32,
 ) -> Result<bool, KoraError> {
-    scalar_bool(
-        store,
+    Ok(sqlx::query_scalar(
         r"SELECT EXISTS(
             SELECT 1 FROM schema_versions sv JOIN subjects sub ON sv.subject_id = sub.id
             WHERE sub.name = $1 AND sv.version = $2 AND sv.deleted = false
         )",
-        &binds![subject, version],
     )
-    .await
+    .bind(subject)
+    .bind(version)
+    .fetch_one(store.pool())
+    .await?)
 }
 
 // -- Transactional operations --
 //
-// The multi-statement registration path must run in a single transaction, which
-// the toolkit's single-statement `SqlExecutor` cannot express; it runs over the
-// raw `PgPool` and owns its dialect SQL verbatim, alongside its private helpers.
+// The multi-statement registration path must run in a single transaction; it
+// runs over the raw `PgPool` and owns its SQL verbatim, alongside its private
+// helpers.
 
 /// Register a schema atomically: upsert subject, deduplicate content globally,
 /// create version, and store references — all in a single transaction.

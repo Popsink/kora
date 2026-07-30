@@ -3,19 +3,6 @@
     "rustup":     "1.29.0",
     "just":       "1.54.0",
     "k6":         "2.0.0",
-    "postgresql": "17.10",
-    "oracle-instantclient": {
-      "version": "21.10.0.0.0",
-      "outputs": ["out", "lib"]
-    }
-  },
-  "env": {
-    "NIXPKGS_ALLOW_UNFREE": "1"
-  },
-  "shell": {
-    "init_hook": [
-      "export DYLD_LIBRARY_PATH=\"$DEVBOX_PACKAGES_DIR/lib:${DYLD_LIBRARY_PATH:-}\"",
-      "export LD_LIBRARY_PATH=\"$DEVBOX_PACKAGES_DIR/lib:${LD_LIBRARY_PATH:-}\""
-    ]
+    "postgresql": "17.10"
   }
 }

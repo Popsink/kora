@@ -21,9 +21,6 @@ async fn register_schema_without_type_defaults_to_avro() {
 async fn register_schema_creates_subject_implicitly() {
     let base = common::spawn_server().await;
     let client = reqwest::Client::new();
-    if common::backend_is_oracle() {
-        return; // remaining assertions query PostgreSQL internals directly
-    }
     let pool = common::pool().await;
     let subject = format!("implicit-{}", uuid::Uuid::new_v4());
 
@@ -168,9 +165,6 @@ async fn register_with_subject_config_normalize_deduplicates() {
 async fn register_avro_schema_valid_succeeds() {
     let base = common::spawn_server().await;
     let client = reqwest::Client::new();
-    if common::backend_is_oracle() {
-        return; // remaining assertions query PostgreSQL internals directly
-    }
     let pool = common::pool().await;
     let subject = format!("valid-{}", uuid::Uuid::new_v4());
 
@@ -216,9 +210,6 @@ async fn register_avro_schema_valid_succeeds() {
 async fn register_avro_schema_idempotent_returns_same_id() {
     let base = common::spawn_server().await;
     let client = reqwest::Client::new();
-    if common::backend_is_oracle() {
-        return; // remaining assertions query PostgreSQL internals directly
-    }
     let pool = common::pool().await;
     let subject = format!("idempotent-{}", uuid::Uuid::new_v4());
 
@@ -1040,11 +1031,9 @@ async fn register_with_python_style_normalize_false() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// A schema larger than 32 KB must round-trip intact. This guards the Oracle
-/// CLOB write path: `schema_text` / `canonical_form` are CLOB columns and must be
-/// bound explicitly as CLOB. A small schema would pass even if the bind regressed
-/// to `NVARCHAR2`, so this deliberately exceeds Oracle's ~32 KB string-bind ceiling
-/// (ORA-01461 / ORA-22835). Backend-agnostic: also exercises the Postgres path.
+/// A schema larger than 32 KB must round-trip intact — guards the large-payload
+/// write path (`schema_text` / `canonical_form`), where a small schema would pass
+/// even if the storage of big values regressed.
 #[tokio::test]
 async fn register_large_schema_over_32kb_round_trips() {
     let base = common::spawn_server().await;
