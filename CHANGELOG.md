@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/Popsink/kora/compare/v0.4.1...v0.5.0) - 2026-07-30
+
+### Other
+
+- Drop Oracle as a backing database (PostgreSQL only) ([#72](https://github.com/Popsink/kora/pull/72))
+- *(deps)* bump tokio in the rust-minor-patch group ([#68](https://github.com/Popsink/kora/pull/68))
+- *(deps)* bump serial_test from 3.5.0 to 4.0.1 ([#69](https://github.com/Popsink/kora/pull/69))
+- *(deps)* bump jsonschema from 0.47.0 to 0.49.1 ([#70](https://github.com/Popsink/kora/pull/70))
+- *(deps)* bump jsonschema from 0.46.10 to 0.47.0 ([#65](https://github.com/Popsink/kora/pull/65))
+- *(deps)* bump the rust-minor-patch group across 1 directory with 7 updates ([#66](https://github.com/Popsink/kora/pull/66))
+- *(deps)* bump the actions-all group with 2 updates ([#63](https://github.com/Popsink/kora/pull/63))
+- *(deps)* bump jsonschema in the rust-minor-patch group ([#61](https://github.com/Popsink/kora/pull/61))
+
 ## [0.4.1](https://github.com/Popsink/kora/compare/v0.4.0...v0.4.1) - 2026-07-01
 
 ### Added
