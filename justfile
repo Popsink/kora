@@ -139,6 +139,96 @@ monitor:
 loadtest-stop:
     {{ loadtest_pg }} down -v
 
+# ---------- Load testing against a deployed environment ----------
+
+# The QA environment lives in the data-plane repo: `PPSK_TARGET=qa inv up` brings up
+# a Kind cluster that deploys Kora from its Helm chart, behind Traefik, with the same
+# basicAuth middleware production uses. It exposes the same Kora pod twice:
+#
+#   auth    https://kora.ppsk.localhost:8443         Traefik + basic auth (prod-like)
+#   direct  https://kora-direct.ppsk.localhost:8443  Traefik, no auth
+#
+# Running the same scenario against both attributes the difference to the ingress.
+# To bypass Traefik altogether, port-forward and point KORA_URL at it yourself:
+#   kubectl --context kind-popsink-data-plane-qa port-forward -n kafka svc/kora 8085:8080
+qa_host_auth   := "kora.ppsk.localhost"
+qa_host_direct := "kora-direct.ppsk.localhost"
+qa_port        := env("QA_PORT", "8443")
+
+# Run a k6 scenario against the QA environment. target: auth (default) | direct
+#
+# k6 runs in Docker so it needs no local install. Two flags earn their place:
+#   --add-host      k6 resolves names with Go's resolver, which does not honour the
+#                   *.localhost NSS rule the host relies on.
+#   --insecure-...  the mkcert CA is trusted on the host but absent from the
+#                   container's trust store.
+[private]
+qa-run scenario target="auth" *k6args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ target }}" in
+      auth)   HOST="{{ qa_host_auth }}" ;;
+      direct) HOST="{{ qa_host_direct }}" ;;
+      *) echo "unknown target '{{ target }}' — pass it positionally: 'auth' (default) or 'direct'" >&2; exit 2 ;;
+    esac
+
+    if [ "{{ target }}" = "auth" ] && [ -z "${KORA_USER:-}" ]; then
+      echo "KORA_USER/KORA_PASSWORD are unset — every request would 401." >&2
+      echo "Read them from the QA Doppler config, e.g.:" >&2
+      echo "  export KORA_USER=\$(doppler secrets get SCHEMA_REGISTRY_USERNAME_DP --plain -p popsink-data-plane -c qa)" >&2
+      echo "  export KORA_PASSWORD=\$(doppler secrets get SCHEMA_REGISTRY_PASSWORD_DP --plain -p popsink-data-plane -c qa)" >&2
+      exit 2
+    fi
+
+    URL="https://${HOST}:{{ qa_port }}"
+    echo "Running {{ scenario }} against ${URL} (target: {{ target }})"
+
+    # K6_* is forwarded so `K6_OUT=experimental-prometheus-rw just qa-smoke` reaches
+    # the QA Prometheus: --network host means localhost:9090 in the container is the
+    # port-forward opened on the host.
+    docker run --rm --network host \
+      --add-host "${HOST}:127.0.0.1" \
+      -e KORA_URL="${URL}" \
+      -e KORA_USER="${KORA_USER:-}" \
+      -e KORA_PASSWORD="${KORA_PASSWORD:-}" \
+      -e K6_OUT="${K6_OUT:-}" \
+      -e K6_PROMETHEUS_RW_SERVER_URL="${K6_PROMETHEUS_RW_SERVER_URL:-http://localhost:9090/api/v1/write}" \
+      -e K6_PROMETHEUS_RW_TREND_STATS="${K6_PROMETHEUS_RW_TREND_STATS:-p(50),p(95),p(99),min,max}" \
+      -e K6_SOAK_DURATION="${K6_SOAK_DURATION:-}" \
+      -v "$PWD/loadtest:/loadtest:ro" \
+      grafana/k6:latest run --insecure-skip-tls-verify {{ k6args }} "/loadtest/scenarios/{{ scenario }}"
+
+# Baseline against QA — 1 VU, 30s.  For the unauthenticated route: just qa-smoke direct
+[group('qa')]
+qa-smoke target="auth":
+    just qa-run smoke.js {{ target }}
+
+# Nominal load against QA — 5min
+[group('qa')]
+qa-load target="auth":
+    just qa-run load.js {{ target }}
+
+# Breaking point against QA — ramp to 300 VUs
+[group('qa')]
+qa-stress target="auth":
+    just qa-run stress.js {{ target }}
+
+# Long-running accumulation against QA — 2h, override K6_SOAK_DURATION
+[group('qa')]
+qa-soak target="auth":
+    just qa-run soak.js {{ target }} --out csv=loadtest/soak-results-qa.csv
+
+# FOR UPDATE lock contention against QA
+[group('qa')]
+qa-contention target="auth":
+    just qa-run contention.js {{ target }}
+
+# Delete under concurrent writes against QA
+[group('qa')]
+qa-delete-load target="auth":
+    just qa-run delete-under-load.js {{ target }}
+
 # ---------- Migration ----------
 
 # Audit Karapace and produce karapace-migration/audit.json  (KARAPACE_URL, KARAPACE_USER, KARAPACE_PASSWORD)
