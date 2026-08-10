@@ -1,12 +1,34 @@
 // helpers.js — Shared fixtures, deterministic generators, and tagged HTTP helpers for Kora load tests.
 
 import http from 'k6/http';
+import encoding from 'k6/encoding';
 import { SharedArray } from 'k6/data';
 
 // -- Configuration --
 
 export const BASE = __ENV.KORA_URL || 'http://localhost:8080';
-export const HEADERS = { 'Content-Type': 'application/vnd.schemaregistry.v1+json' };
+
+// Basic auth, sent only when credentials are supplied — so a local run against a
+// bare Kora is byte-identical to what it was before this existed.
+//
+// Kora has no authentication of its own: deployed environments put a Traefik
+// basicAuth middleware in front of it. That middleware matches on Host and not on
+// path, which means EVERY request needs the header — including GET /metrics.
+// Variable names match karapace-migration/verify.py (`just migrate-verify`).
+const USER = __ENV.KORA_USER;
+const PASS = __ENV.KORA_PASSWORD;
+
+export const AUTH_HEADERS = USER
+  ? { Authorization: `Basic ${encoding.b64encode(`${USER}:${PASS}`)}` }
+  : {};
+
+// Writes also negotiate the Confluent content type; reads and deletes must not
+// carry it, or they would exercise Kora's content-type negotiation differently
+// from a real client and change what the load test measures.
+export const HEADERS = {
+  'Content-Type': 'application/vnd.schemaregistry.v1+json',
+  ...AUTH_HEADERS,
+};
 
 // -- Schema fixtures (SharedArray — zero-copy across VUs) --
 
@@ -86,12 +108,14 @@ export function registerSchema(subject, schema, schemaType = 'AVRO') {
 
 export function getById(id) {
   return http.get(`${BASE}/schemas/ids/${id}`, {
+    headers: AUTH_HEADERS,
     tags: { op: 'get_by_id', name: 'GET /schemas/ids/{id}' },
   });
 }
 
 export function getByVersion(subject, version = 'latest') {
   return http.get(`${BASE}/subjects/${subject}/versions/${version}`, {
+    headers: AUTH_HEADERS,
     tags: { op: 'get_by_version', name: 'GET /subjects/{subject}/versions/{version}' },
   });
 }
@@ -99,12 +123,14 @@ export function getByVersion(subject, version = 'latest') {
 export function listSubjects(prefix = '') {
   const qs = prefix ? `?subjectPrefix=${prefix}` : '';
   return http.get(`${BASE}/subjects${qs}`, {
+    headers: AUTH_HEADERS,
     tags: { op: 'list_subjects', name: 'GET /subjects' },
   });
 }
 
 export function listVersions(subject) {
   return http.get(`${BASE}/subjects/${subject}/versions`, {
+    headers: AUTH_HEADERS,
     tags: { op: 'list_versions', name: 'GET /subjects/{subject}/versions' },
   });
 }
@@ -128,6 +154,7 @@ export function testCompatibility(subject, version, schema, schemaType = 'AVRO')
 export function deleteSubject(subject, permanent = false) {
   const qs = permanent ? '?permanent=true' : '';
   return http.del(`${BASE}/subjects/${subject}${qs}`, null, {
+    headers: AUTH_HEADERS,
     tags: { op: 'delete', name: 'DELETE /subjects/{subject}' },
   });
 }
@@ -135,12 +162,14 @@ export function deleteSubject(subject, permanent = false) {
 export function deleteVersion(subject, version, permanent = false) {
   const qs = permanent ? '?permanent=true' : '';
   return http.del(`${BASE}/subjects/${subject}/versions/${version}${qs}`, null, {
+    headers: AUTH_HEADERS,
     tags: { op: 'delete', name: 'DELETE /subjects/{subject}/versions/{version}' },
   });
 }
 
 export function scrapeMetrics() {
   return http.get(`${BASE}/metrics`, {
+    headers: AUTH_HEADERS,
     tags: { op: 'prom_scrape', name: 'GET /metrics' },
   });
 }
