@@ -76,8 +76,10 @@ export const options = {
 
 export function setup() {
   // Idempotent seed: register only the missing subjects so re-runs are cheap.
+  // Count ONLY our `scale-*` subjects (the registry may already hold hundreds of
+  // thousands of `stress-*` subjects from load runs — the total is meaningless here).
   let have = 0;
-  const res = listSubjects();
+  const res = listSubjects('scale-');
   try { have = res.json().length; } catch (_) { have = 0; }
 
   if (have >= TARGET) {

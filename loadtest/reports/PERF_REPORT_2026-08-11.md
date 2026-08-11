@@ -55,6 +55,31 @@ Reads stay in the hundreds-of-ms range; **writes are the first to become painful
 - **0 errors / 0 interrupted iterations** on every run (≈1.7M requests total).
 - Degradation mode = **latency**, never failure. No 5xx, no dropped connections, no crash — even at 2500 concurrent users.
 
+## Scale test — 30k schemas (preliminary, confounded)
+
+A first `scale-30k.js` run (30k `scale-*` subjects, 50 VUs, reads) shows reads
+degrading sharply with **data volume** — not concurrency:
+
+| Endpoint | p99 @ large-scale registry (only 50 VUs) |
+|---|---|
+| get_by_id | 1.81 s |
+| get_by_version | 1.91 s |
+| list_versions | 2.0 s |
+| list_subjects | 4.05 s |
+| check_schema | 4.28 s |
+
+0 errors, but **ms → seconds** at only 50 VUs — a class of problem the load tests
+(800 schemas) never surface. **Data volume hurts reads far more than concurrency.**
+
+**⚠️ Confounded — NOT a clean 30k figure.** The registry actually held **227k
+subjects** (30k `scale-*` + **191k `stress-*` residue** from the load runs above),
+on a resource-constrained local Postgres. So these numbers reflect a 6.6× larger,
+polluted registry. **Lesson: scale tests need a fresh registry** (recreate the
+DB/env between load and scale runs — the `scale-30k` seed now counts only `scale-*`,
+but can't undo prior pollution). The **direction holds** (schema volume materially
+degrades read latency); a trustworthy 30k number needs a clean re-run on the
+dimensioned environment.
+
 ## Bottleneck analysis
 
 The saturation at ~1200 req/s + writes-degrade-first strongly points to **the single replica and the DB connection pool (`DB_POOL_MAX=20`)** as the limiter, not Kora's request handling itself.
