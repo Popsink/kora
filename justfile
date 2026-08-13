@@ -114,6 +114,11 @@ load:
 stress:
     just loadtest-run stress.js
 
+# Read performance at large subject scale — seed + measure, override SCALE_TARGET
+[group('loadtest')]
+scale:
+    just loadtest-run scale-30k.js
+
 # Long-running accumulation — 2h, override K6_SOAK_DURATION
 [group('loadtest')]
 soak:
