@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/Popsink/kora/compare/v0.5.0...v0.5.1) - 2026-08-18
+
+### Other
+
+- *(deps)* bump the rust-minor-patch group across 1 directory with 3 updates ([#79](https://github.com/Popsink/kora/pull/79))
+- *(loadtest)* Kora load & scale harness + August perf report ([#78](https://github.com/Popsink/kora/pull/78))
+- adapting justfile for new env and refac helpers ( claude did the js ) ([#76](https://github.com/Popsink/kora/pull/76))
+- *(qa)* add August 2026 QA plan ([#74](https://github.com/Popsink/kora/pull/74))
+
 ## [0.5.0](https://github.com/Popsink/kora/compare/v0.4.1...v0.5.0) - 2026-07-30
 
 ### Other
