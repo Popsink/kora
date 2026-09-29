@@ -1,10 +1,10 @@
 [package]
 name = "kora"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [dependencies]
-apache-avro = "0.21.0"
+apache-avro = "0.22.0"
 async-trait = "0.1.83"
 axum = { version = "0.8.9", features = ["macros"] }
 figment = { version = "0.10.19", features = ["env"] }

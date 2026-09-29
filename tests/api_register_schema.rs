@@ -232,6 +232,23 @@ async fn register_avro_schema_idempotent_returns_same_id() {
 }
 
 #[tokio::test]
+async fn register_avro_decimal_with_bytes_default_succeeds() {
+    // Regression for #86: Debezium emits this for `DECIMAL(7,2) NOT NULL DEFAULT 0`.
+    let base = common::spawn_server().await;
+    let client = reqwest::Client::new();
+    let subject = format!("decimal-default-{}", uuid::Uuid::new_v4());
+
+    let id = common::api::register_schema(
+        &client,
+        &base,
+        &subject,
+        common::AVRO_SCHEMA_DECIMAL_DEFAULT,
+    )
+    .await;
+    assert!(id > 0);
+}
+
+#[tokio::test]
 async fn register_avro_schema_invalid_returns_422() {
     let base = common::spawn_server().await;
     let client = reqwest::Client::new();

@@ -3,7 +3,7 @@
 use apache_avro::Schema;
 use apache_avro::error::CompatibilityError;
 use apache_avro::rabin::Rabin;
-use apache_avro::schema_compatibility::SchemaCompatibility;
+use apache_avro::schema_compatibility::{Compatibility, SchemaCompatibility};
 
 use super::{CompatDirection, CompatibilityResult};
 use crate::error::KoraError;
@@ -59,9 +59,18 @@ pub fn check_compatibility(
     };
 
     match result {
-        Ok(()) => Ok(CompatibilityResult {
+        Ok(Compatibility::Full) => Ok(CompatibilityResult {
             is_compatible: true,
             messages: Vec::new(),
+        }),
+        // Some writer values cannot be resolved (narrowed union, dropped enum symbol without
+        // reader default). Confluent treats this as incompatible.
+        Ok(Compatibility::Partial) => Ok(CompatibilityResult {
+            is_compatible: false,
+            messages: vec![
+                "Reader schema cannot resolve every value of the writer schema (partial compatibility)"
+                    .to_string(),
+            ],
         }),
         Err(e) => Ok(CompatibilityResult {
             is_compatible: false,

@@ -349,3 +349,28 @@ fn confluent_avro_full_transitive_remove_without_default_fails() {
         CompatDirection::Full,
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Partial compatibility (not in the Confluent test; Avro Java semantics)
+// ---------------------------------------------------------------------------
+
+const ENUM_ABC: &str = r#"{"type":"record","name":"myrecord","fields":[{"name":"e","type":{"type":"enum","name":"E","symbols":["A","B","C"]}}]}"#;
+const ENUM_AB: &str = r#"{"type":"record","name":"myrecord","fields":[{"name":"e","type":{"type":"enum","name":"E","symbols":["A","B"]}}]}"#;
+const ENUM_AB_DEFAULT: &str = r#"{"type":"record","name":"myrecord","fields":[{"name":"e","type":{"type":"enum","name":"E","symbols":["A","B"],"default":"A"}}]}"#;
+
+#[test]
+fn avro_backward_remove_enum_symbol_fails() {
+    // Old writer may emit "C", which the new reader cannot resolve.
+    let result = check_compatibility(ENUM_AB, ENUM_ABC, CompatDirection::Backward).unwrap();
+    assert!(!result.is_compatible);
+    assert!(!result.messages.is_empty());
+}
+
+#[test]
+fn avro_backward_remove_enum_symbol_with_reader_default() {
+    assert!(is_compatible(
+        ENUM_AB_DEFAULT,
+        ENUM_ABC,
+        CompatDirection::Backward
+    ));
+}
