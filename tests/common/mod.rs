@@ -34,6 +34,10 @@ pub const AVRO_SCHEMA_V3: &str = r#"{"type":"record","name":"Test","fields":[{"n
 pub const AVRO_SCHEMA_OTHER: &str =
     r#"{"type":"record","name":"Other","fields":[{"name":"x","type":"string"}]}"#;
 
+/// A Debezium-style Avro schema for a MySQL `DECIMAL(7,2) NOT NULL DEFAULT 0` column: a `bytes`
+/// decimal whose default is the spec-encoded one-byte unscaled value `0` (`"\u0000"`).
+pub const AVRO_SCHEMA_DECIMAL_DEFAULT: &str = r#"{"type":"record","name":"Value","namespace":"server.inventory.orders","fields":[{"name":"quantity","type":{"type":"bytes","scale":2,"precision":7,"connect.version":1,"connect.parameters":{"scale":"2","connect.decimal.precision":"7"},"connect.default":"\u0000","connect.name":"org.apache.kafka.connect.data.Decimal","logicalType":"decimal"},"default":"\u0000"}],"connect.name":"server.inventory.orders.Value"}"#;
+
 // -- JSON Schema Fixtures --
 
 /// A valid JSON Schema with one property.

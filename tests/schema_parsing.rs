@@ -102,6 +102,13 @@ fn avro_different_schemas_have_different_fingerprints() {
     assert_ne!(a.fingerprint, b.fingerprint);
 }
 
+#[test]
+fn avro_parse_decimal_with_bytes_default() {
+    // Regression: apache-avro 0.21 rejected a JSON-string default on a `bytes` decimal (#86).
+    let result = schema::parse(SchemaFormat::Avro, common::AVRO_SCHEMA_DECIMAL_DEFAULT);
+    assert!(result.is_ok(), "{:?}", result.err());
+}
+
 // -- JSON Schema parsing --
 
 #[test]
