@@ -53,6 +53,23 @@ kora:
   extraEnvVarsCM: ""
   extraEnvVarsSecret: ""
 
+## @section Authentication parameters
+## @param auth.enabled Require HTTP basic auth and enforce per-principal subject ACLs (AUTH_ENABLED). /health and /metrics stay open
+## @param auth.cacheTtlSeconds How long verified credentials and schema-ID read decisions stay cached per replica (AUTH_CACHE_TTL_SECS, 0 disables)
+## @param auth.admin.username Bootstrap admin login, reconciled on every startup (KORA_ADMIN_USERNAME). Empty = no bootstrap admin
+## @param auth.admin.password Direct value for the bootstrap admin password (used if auth.admin.existingSecret is not set)
+## @param auth.admin.existingSecret Name of an existing secret holding the bootstrap admin password
+## @param auth.admin.secretKeys.password Key name in the secret for the bootstrap admin password
+auth:
+  enabled: false
+  cacheTtlSeconds: 60
+  admin:
+    username: ""
+    password: ""
+    existingSecret: ""
+    secretKeys:
+      password: admin-password
+
 ## @section Database parameters (external PostgreSQL)
 ## @param database.host Database host
 ## @param database.port Database port

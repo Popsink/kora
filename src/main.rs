@@ -25,6 +25,10 @@ async fn main() {
         .expect("failed to install Prometheus recorder");
 
     metrics::describe_counter!("http_requests_total", "Total HTTP requests served");
+    metrics::describe_counter!(
+        "kora_auth_rejections_total",
+        "Requests rejected with 401 or 403, by status and principal"
+    );
     metrics::describe_histogram!(
         "http_request_duration_seconds",
         "HTTP request latency in seconds"
@@ -66,7 +70,30 @@ async fn main() {
         );
     }
 
-    let app = api::router(storage, metrics_handle, cfg.max_body_size);
+    // Reconcile the bootstrap admin: KORA_ADMIN_USERNAME / KORA_ADMIN_PASSWORD
+    // are the source of truth on every startup, like DEFAULT_COMPATIBILITY.
+    if let (Some(name), Some(password)) = (&cfg.admin_username, &cfg.admin_password) {
+        let changed = kora::auth::bootstrap_admin(&storage, name, password)
+            .await
+            .expect("failed to reconcile the bootstrap admin");
+        tracing::info!(principal = %name, changed, "reconciled bootstrap admin");
+    } else if cfg.auth_enabled {
+        tracing::warn!(
+            "AUTH_ENABLED is set without KORA_ADMIN_USERNAME / KORA_ADMIN_PASSWORD; \
+             only principals already stored in the database can authenticate"
+        );
+    }
+
+    let auth = if cfg.auth_enabled {
+        tracing::info!("authentication enabled");
+        api::auth::AuthState::enabled(
+            storage.clone(),
+            std::time::Duration::from_secs(cfg.auth_cache_ttl_secs),
+        )
+    } else {
+        api::auth::AuthState::disabled()
+    };
+    let app = api::router(storage, metrics_handle, cfg.max_body_size, auth);
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr)
         .await
