@@ -77,6 +77,21 @@ pub enum KoraError {
     /// Error while forwarding request to primary (50003).
     #[error("Error while forwarding the request to the primary")]
     ForwardingError,
+    /// Missing or invalid credentials (40101).
+    #[error("Unauthorized")]
+    Unauthenticated,
+    /// Authenticated principal lacks the required access (40301).
+    #[error("{0}")]
+    Forbidden(String),
+    /// Principal not found (40410).
+    #[error("Principal '{0}' not found")]
+    PrincipalNotFound(String),
+    /// Principal already exists (40902).
+    #[error("Principal '{0}' already exists")]
+    PrincipalAlreadyExists(String),
+    /// Invalid principal definition (42210).
+    #[error("Invalid principal: {0}")]
+    InvalidPrincipal(String),
 }
 
 /// Confluent-compatible JSON error body.
@@ -117,6 +132,11 @@ impl KoraError {
             Self::BackendDataStore(_) => 50001,
             Self::OperationTimeout => 50002,
             Self::ForwardingError => 50003,
+            Self::Unauthenticated => 40101,
+            Self::Forbidden(_) => 40301,
+            Self::PrincipalNotFound(_) => 40410,
+            Self::PrincipalAlreadyExists(_) => 40902,
+            Self::InvalidPrincipal(_) => 42210,
         }
     }
 
@@ -129,7 +149,8 @@ impl KoraError {
             | Self::InvalidVersion(_)
             | Self::InvalidMode(_)
             | Self::OperationNotPermitted
-            | Self::ReferenceExists(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | Self::ReferenceExists(_)
+            | Self::InvalidPrincipal(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::SubjectNotFound
             | Self::VersionNotFound
             | Self::SchemaNotFound
@@ -138,8 +159,11 @@ impl KoraError {
             | Self::SchemaVersionSoftDeleted(_, _)
             | Self::SchemaVersionNotSoftDeleted(_, _)
             | Self::SubjectCompatibilityNotConfigured(_)
-            | Self::SubjectModeNotConfigured(_) => StatusCode::NOT_FOUND,
-            Self::IncompatibleSchema => StatusCode::CONFLICT,
+            | Self::SubjectModeNotConfigured(_)
+            | Self::PrincipalNotFound(_) => StatusCode::NOT_FOUND,
+            Self::IncompatibleSchema | Self::PrincipalAlreadyExists(_) => StatusCode::CONFLICT,
+            Self::Unauthenticated => StatusCode::UNAUTHORIZED,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::BackendDataStore(_) | Self::OperationTimeout | Self::ForwardingError => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
