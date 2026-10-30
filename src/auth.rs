@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::KoraError;
+use crate::storage::DynStorage;
+use crate::storage::types::{NewPrincipal, PrincipalUpdate};
 
 // -- Types --
 
@@ -369,6 +371,55 @@ pub async fn verify_password_blocking(password: String, phc: String) -> bool {
     tokio::task::spawn_blocking(move || verify_password(&password, &phc))
         .await
         .unwrap_or(false)
+}
+
+// -- Bootstrap --
+
+/// Ensure the bootstrap admin from `KORA_ADMIN_USERNAME` / `KORA_ADMIN_PASSWORD`
+/// exists with that password and the `admin` role. The environment is the
+/// source of truth: an existing principal of that name is promoted and its
+/// password reset when it does not match. Returns `true` when a row changed.
+///
+/// # Errors
+///
+/// Returns a database error, or `KoraError::InvalidPrincipal` for an invalid
+/// name or empty password.
+pub async fn bootstrap_admin(
+    storage: &DynStorage,
+    name: &str,
+    password: &str,
+) -> Result<bool, KoraError> {
+    validate_name(name)?;
+    validate_password(password)?;
+    if let Some(existing) = storage.find_principal(name).await? {
+        let matches =
+            verify_password_blocking(password.to_owned(), existing.password_hash.clone()).await;
+        if matches && existing.role == Role::Admin {
+            return Ok(false);
+        }
+        let hash = hash_password_blocking(password.to_owned()).await?;
+        storage
+            .update_principal(
+                name,
+                &PrincipalUpdate {
+                    password_hash: Some(&hash),
+                    role: Some(Role::Admin),
+                    rules: None,
+                },
+            )
+            .await?;
+        return Ok(true);
+    }
+    let hash = hash_password_blocking(password.to_owned()).await?;
+    storage
+        .create_principal(&NewPrincipal {
+            name,
+            password_hash: &hash,
+            role: Role::Admin,
+            rules: &[],
+        })
+        .await?;
+    Ok(true)
 }
 
 // -- Cache --

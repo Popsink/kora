@@ -21,7 +21,10 @@ use sqlx::postgres::PgPoolOptions;
 use crate::config::KoraConfig;
 use crate::error::KoraError;
 use crate::types::SchemaReference;
-use types::{CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion};
+use types::{
+    CompatCheck, HardDeleteResult, NewPrincipal, NewSchema, PrincipalRecord, PrincipalUpdate,
+    SchemaVersion, SubjectVersion,
+};
 
 pub use backends::PgStorage;
 
@@ -567,6 +570,50 @@ pub trait Storage: Send + Sync + 'static {
     ///
     /// Returns a database error on connection failure.
     async fn is_version_referenced(&self, subject: &str, version: i32) -> Result<bool, KoraError>;
+
+    // -- Principals --
+
+    /// List all principals, sorted by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn list_principals(&self) -> Result<Vec<PrincipalRecord>, KoraError>;
+
+    /// Find a principal by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn find_principal(&self, name: &str) -> Result<Option<PrincipalRecord>, KoraError>;
+
+    /// Create a principal. Returns `None` if the name is already taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn create_principal(
+        &self,
+        new: &NewPrincipal<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError>;
+
+    /// Apply a partial update to a principal. Returns `None` if it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn update_principal(
+        &self,
+        name: &str,
+        update: &PrincipalUpdate<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError>;
+
+    /// Delete a principal. Returns its ID, or `None` if it did not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn delete_principal(&self, name: &str) -> Result<Option<i64>, KoraError>;
 }
 
 // -- Factory --

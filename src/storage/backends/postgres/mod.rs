@@ -8,6 +8,7 @@
 
 pub mod compatibility;
 pub mod mode;
+pub mod principals;
 pub mod references;
 pub mod schemas;
 pub mod subjects;
@@ -17,7 +18,8 @@ use sqlx::PgPool;
 
 use crate::error::KoraError;
 use crate::storage::types::{
-    CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion,
+    CompatCheck, HardDeleteResult, NewPrincipal, NewSchema, PrincipalRecord, PrincipalUpdate,
+    SchemaVersion, SubjectVersion,
 };
 use crate::storage::{PoolStats, Storage};
 use crate::types::SchemaReference;
@@ -448,5 +450,34 @@ impl Storage for PgStorage {
 
     async fn is_version_referenced(&self, subject: &str, version: i32) -> Result<bool, KoraError> {
         references::is_version_referenced(self, subject, version).await
+    }
+
+    // -- Principals --
+
+    async fn list_principals(&self) -> Result<Vec<PrincipalRecord>, KoraError> {
+        principals::list_principals(self).await
+    }
+
+    async fn find_principal(&self, name: &str) -> Result<Option<PrincipalRecord>, KoraError> {
+        principals::find_principal(self, name).await
+    }
+
+    async fn create_principal(
+        &self,
+        new: &NewPrincipal<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError> {
+        principals::create_principal(self, new).await
+    }
+
+    async fn update_principal(
+        &self,
+        name: &str,
+        update: &PrincipalUpdate<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError> {
+        principals::update_principal(self, name, update).await
+    }
+
+    async fn delete_principal(&self, name: &str) -> Result<Option<i64>, KoraError> {
+        principals::delete_principal(self, name).await
     }
 }
