@@ -297,6 +297,7 @@ pub async fn list_subjects(
             params.deleted,
             params.deleted_only,
             prefix,
+            None,
             params.offset.max(0),
             params.limit,
         )

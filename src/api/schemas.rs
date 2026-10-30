@@ -141,6 +141,7 @@ pub async fn get_subjects_by_schema_id(
             id,
             params.deleted,
             params.subject.as_deref(),
+            None,
             params.offset.max(0),
             params.limit,
         )
@@ -169,6 +170,7 @@ pub async fn get_versions_by_schema_id(
             id,
             params.deleted,
             params.subject.as_deref(),
+            None,
             params.offset.max(0),
             params.limit,
         )
@@ -197,6 +199,7 @@ pub async fn list_schemas(
             params.deleted,
             params.latest_only,
             prefix,
+            None,
             params.offset.max(0),
             params.limit,
         )
