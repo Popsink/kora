@@ -166,7 +166,12 @@ fn prometheus_handle() -> PrometheusHandle {
 pub async fn spawn_server() -> String {
     let storage = storage().await;
     let config = kora::config::KoraConfig::default();
-    let app = kora::api::router(storage, prometheus_handle(), config.max_body_size);
+    let app = kora::api::router(
+        storage,
+        prometheus_handle(),
+        config.max_body_size,
+        kora::api::auth::AuthState::disabled(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("should bind to random port");

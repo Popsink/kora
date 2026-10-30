@@ -9,6 +9,8 @@ use serde::Deserialize;
 
 use std::collections::HashMap;
 
+use crate::api::auth::AuthState;
+use crate::auth::Caller;
 use crate::error::KoraError;
 use crate::schema::SchemaFormat;
 use crate::storage::DynStorage;
@@ -90,12 +92,16 @@ use super::subjects::{default_limit, default_subject_prefix};
 /// # Errors
 ///
 /// Returns `KoraError::SchemaNotFound` (404) if no schema exists with the
-/// given ID, or `KoraError::BackendDataStore` (500) for database failures.
+/// given ID or the caller cannot read any subject it is registered under, or
+/// `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_schema_by_id(
     State(storage): State<DynStorage>,
+    State(auth): State<AuthState>,
+    caller: Caller,
     Path(id): Path<i64>,
     Query(params): Query<GetSchemaByIdParams>,
 ) -> Result<impl IntoResponse, KoraError> {
+    auth.ensure_schema_readable(&storage, &caller, id).await?;
     let (schema_text, schema_type) = storage
         .find_schema_by_id(id)
         .await?
@@ -124,16 +130,24 @@ pub async fn get_schema_by_id(
 ///
 /// `GET /schemas/ids/{id}/subjects`
 ///
+/// Only subjects the caller can read are returned.
+///
 /// # Errors
 ///
 /// Returns `KoraError::SchemaNotFound` (404) if no schema exists with the
-/// given ID, or `KoraError::BackendDataStore` (500) for database failures.
+/// given ID (or none of its subjects is readable by the caller), or
+/// `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_subjects_by_schema_id(
     State(storage): State<DynStorage>,
+    State(auth): State<AuthState>,
+    caller: Caller,
     Path(id): Path<i64>,
     Query(params): Query<CrossRefParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    if !storage.schema_exists(id).await? {
+    if caller.read_scope().is_some() {
+        // Readable implies existing; a missing and an unreadable ID look alike.
+        auth.ensure_schema_readable(&storage, &caller, id).await?;
+    } else if !storage.schema_exists(id).await? {
         return Err(KoraError::SchemaNotFound);
     }
     let subjects = storage
@@ -141,7 +155,7 @@ pub async fn get_subjects_by_schema_id(
             id,
             params.deleted,
             params.subject.as_deref(),
-            None,
+            caller.read_scope(),
             params.offset.max(0),
             params.limit,
         )
@@ -153,16 +167,24 @@ pub async fn get_subjects_by_schema_id(
 ///
 /// `GET /schemas/ids/{id}/versions`
 ///
+/// Only subject-version pairs the caller can read are returned.
+///
 /// # Errors
 ///
 /// Returns `KoraError::SchemaNotFound` (404) if no schema exists with the
-/// given ID, or `KoraError::BackendDataStore` (500) for database failures.
+/// given ID (or none of its subjects is readable by the caller), or
+/// `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_versions_by_schema_id(
     State(storage): State<DynStorage>,
+    State(auth): State<AuthState>,
+    caller: Caller,
     Path(id): Path<i64>,
     Query(params): Query<CrossRefParams>,
 ) -> Result<impl IntoResponse, KoraError> {
-    if !storage.schema_exists(id).await? {
+    if caller.read_scope().is_some() {
+        // Readable implies existing; a missing and an unreadable ID look alike.
+        auth.ensure_schema_readable(&storage, &caller, id).await?;
+    } else if !storage.schema_exists(id).await? {
         return Err(KoraError::SchemaNotFound);
     }
     let versions = storage
@@ -170,7 +192,7 @@ pub async fn get_versions_by_schema_id(
             id,
             params.deleted,
             params.subject.as_deref(),
-            None,
+            caller.read_scope(),
             params.offset.max(0),
             params.limit,
         )
@@ -178,7 +200,8 @@ pub async fn get_versions_by_schema_id(
     Ok(Json(versions))
 }
 
-/// List all schemas across all subjects, with optional filtering.
+/// List all schemas across all subjects, with optional filtering. Restricted
+/// to the subjects the caller can read (intersected with `subjectPrefix`).
 ///
 /// `GET /schemas`
 ///
@@ -187,6 +210,7 @@ pub async fn get_versions_by_schema_id(
 /// Returns `KoraError::BackendDataStore` (500) for database failures.
 pub async fn list_schemas(
     State(storage): State<DynStorage>,
+    caller: Caller,
     Query(params): Query<ListSchemasParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     let prefix = if params.subject_prefix == ":*:" || params.subject_prefix.is_empty() {
@@ -199,7 +223,7 @@ pub async fn list_schemas(
             params.deleted,
             params.latest_only,
             prefix,
-            None,
+            caller.read_scope(),
             params.offset.max(0),
             params.limit,
         )
@@ -230,9 +254,12 @@ pub async fn list_schemas(
 /// given ID, or `KoraError::BackendDataStore` (500) for database failures.
 pub async fn get_schema_text_by_id(
     State(storage): State<DynStorage>,
+    State(auth): State<AuthState>,
+    caller: Caller,
     Path(id): Path<i64>,
     Query(_params): Query<GetSchemaTextParams>,
 ) -> Result<impl IntoResponse, KoraError> {
+    auth.ensure_schema_readable(&storage, &caller, id).await?;
     let (schema_text, _schema_type) = storage
         .find_schema_by_id(id)
         .await?

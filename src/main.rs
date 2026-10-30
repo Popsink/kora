@@ -80,7 +80,16 @@ async fn main() {
         );
     }
 
-    let app = api::router(storage, metrics_handle, cfg.max_body_size);
+    let auth = if cfg.auth_enabled {
+        tracing::info!("authentication enabled");
+        api::auth::AuthState::enabled(
+            storage.clone(),
+            std::time::Duration::from_secs(cfg.auth_cache_ttl_secs),
+        )
+    } else {
+        api::auth::AuthState::disabled()
+    };
+    let app = api::router(storage, metrics_handle, cfg.max_body_size, auth);
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr)
         .await

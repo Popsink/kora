@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::api::mode::enforce_writable;
+use crate::auth::Caller;
 use crate::error::KoraError;
 use crate::schema::{self, SchemaFormat};
 use crate::storage::{DynStorage, types};
@@ -153,6 +154,7 @@ pub struct ReferencedByParams {
 /// `KoraError::BackendDataStore` (500) for database failures.
 pub async fn register_schema(
     State(storage): State<DynStorage>,
+    caller: Caller,
     Path(subject): Path<String>,
     Query(params): Query<RegisterParams>,
     body: Result<Json<SchemaRequest>, JsonRejection>,
@@ -160,6 +162,13 @@ pub async fn register_schema(
     let Json(body) = body.map_err(|e| KoraError::InvalidSchema(e.body_text()))?;
 
     validate_subject(&subject)?;
+
+    // Every referenced subject must be readable by the caller (no pulling
+    // another tenant's schema in by reference).
+    let refs = body.references.as_deref().unwrap_or_default();
+    for r in refs {
+        caller.require_read(&r.subject)?;
+    }
 
     // Enforce registry mode before expensive parsing/compat checks.
     enforce_writable(&storage, &subject).await?;
@@ -197,7 +206,6 @@ pub async fn register_schema(
     };
 
     // Validate references before any writes.
-    let refs = body.references.as_deref().unwrap_or_default();
     if !refs.is_empty() {
         storage.validate_references(refs).await?;
     }
@@ -280,11 +288,14 @@ pub async fn check_schema(
 /// `GET /subjects` — non-deleted subjects (default).
 /// `GET /subjects?deleted=true` — all subjects (including soft-deleted).
 ///
+/// Restricted to the subjects the caller can read.
+///
 /// # Errors
 ///
 /// Returns `KoraError::BackendDataStore` (500) for database failures.
 pub async fn list_subjects(
     State(storage): State<DynStorage>,
+    caller: Caller,
     Query(params): Query<ListSubjectsParams>,
 ) -> Result<impl IntoResponse, KoraError> {
     let prefix = if params.subject_prefix == ":*:" || params.subject_prefix.is_empty() {
@@ -297,7 +308,7 @@ pub async fn list_subjects(
             params.deleted,
             params.deleted_only,
             prefix,
-            None,
+            caller.read_scope(),
             params.offset.max(0),
             params.limit,
         )
