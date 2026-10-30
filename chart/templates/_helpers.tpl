@@ -72,3 +72,15 @@ Usage: include "kora.requireValueOrExistingSecret" (dict "value" .Values.foo.bar
 {{- fail .message -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Return the name of the secret containing the bootstrap admin password.
+Uses auth.admin.existingSecret if provided, otherwise the auto-created secret name.
+*/}}
+{{- define "kora.authSecretName" -}}
+{{- if .Values.auth.admin.existingSecret -}}
+{{- include "common.tplvalues.render" (dict "value" .Values.auth.admin.existingSecret "context" $) -}}
+{{- else -}}
+{{- printf "%s-auth" (include "common.names.fullname" .) -}}
+{{- end -}}
+{{- end -}}
