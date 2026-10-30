@@ -1,5 +1,6 @@
 //! API route construction.
 
+pub mod admin;
 pub mod auth;
 pub mod compatibility;
 pub mod health;
@@ -13,7 +14,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, FromRef},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 
@@ -126,6 +127,16 @@ pub fn router(
             get(mode::get_subject_mode)
                 .put(mode::set_subject_mode)
                 .delete(mode::delete_subject_mode),
+        )
+        .route(
+            "/admin/principals",
+            get(admin::list_principals).post(admin::create_principal),
+        )
+        .route(
+            "/admin/principals/{name}",
+            patch(admin::update_principal)
+                .get(admin::get_principal)
+                .delete(admin::delete_principal),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.auth.clone(),
