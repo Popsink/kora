@@ -169,13 +169,54 @@ fn prometheus_handle() -> PrometheusHandle {
 /// Spawn the Kora server on a random port and return the base URL.
 pub async fn spawn_server() -> String {
     let storage = storage().await;
+    serve(storage, kora::api::auth::AuthState::disabled()).await
+}
+
+/// Basic-auth credentials of a test principal.
+#[derive(Debug, Clone)]
+pub struct Creds {
+    /// Principal name.
+    pub name: String,
+    /// Clear-text password.
+    pub password: String,
+}
+
+impl Creds {
+    /// Fresh, unique credentials (`{prefix}-<uuid>`).
+    pub fn unique(prefix: &str) -> Self {
+        let id = uuid::Uuid::new_v4().as_simple().to_string();
+        Self {
+            name: format!("{prefix}-{id}"),
+            password: format!("pw-{id}"),
+        }
+    }
+}
+
+/// A server spawned with `AUTH_ENABLED=true` and its own bootstrap admin.
+pub struct AuthServer {
+    /// Base URL.
+    pub base: String,
+    /// The bootstrap admin.
+    pub admin: Creds,
+}
+
+/// Spawn the Kora server with authentication enabled and a fresh bootstrap
+/// admin (principals are unique per test; the database is shared).
+pub async fn spawn_auth_server() -> AuthServer {
+    let storage = storage().await;
+    let admin = Creds::unique("admin");
+    kora::auth::bootstrap_admin(&storage, &admin.name, &admin.password)
+        .await
+        .expect("bootstrap admin should be created");
+    let auth =
+        kora::api::auth::AuthState::enabled(storage.clone(), std::time::Duration::from_mins(1));
+    let base = serve(storage, auth).await;
+    AuthServer { base, admin }
+}
+
+async fn serve(storage: kora::storage::DynStorage, auth: kora::api::auth::AuthState) -> String {
     let config = kora::config::KoraConfig::default();
-    let app = kora::api::router(
-        storage,
-        prometheus_handle(),
-        config.max_body_size,
-        kora::api::auth::AuthState::disabled(),
-    );
+    let app = kora::api::router(storage, prometheus_handle(), config.max_body_size, auth);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("should bind to random port");
