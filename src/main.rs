@@ -25,6 +25,10 @@ async fn main() {
         .expect("failed to install Prometheus recorder");
 
     metrics::describe_counter!("http_requests_total", "Total HTTP requests served");
+    metrics::describe_counter!(
+        "kora_auth_rejections_total",
+        "Requests rejected with 401 or 403, by status and principal"
+    );
     metrics::describe_histogram!(
         "http_request_duration_seconds",
         "HTTP request latency in seconds"

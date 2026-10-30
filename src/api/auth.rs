@@ -125,9 +125,15 @@ pub async fn enforce(State(auth): State<AuthState>, req: Request, next: Next) ->
     };
     let (mut parts, body) = req.into_parts();
 
-    let Ok(principal) = authenticator.authenticate(&parts.headers).await else {
-        return unauthorized();
+    let principal = match authenticator.authenticate(&parts.headers).await {
+        Ok(p) => p,
+        Err(failure) => {
+            let mut resp = unauthorized();
+            resp.extensions_mut().insert(failure.label());
+            return resp;
+        }
     };
+    let label = PrincipalLabel(principal.name.clone());
     let caller = Caller::Principal(principal);
 
     let route = parts
@@ -144,12 +150,23 @@ pub async fn enforce(State(auth): State<AuthState>, req: Request, next: Next) ->
     if let Some(route) = route.as_deref()
         && let Err(e) = check(&caller, &parts.method, route, subject)
     {
-        return e.into_response();
+        let mut resp = e.into_response();
+        resp.extensions_mut().insert(label);
+        return resp;
     }
 
     parts.extensions.insert(caller);
-    next.run(Request::from_parts(parts, body)).await
+    let mut resp = next.run(Request::from_parts(parts, body)).await;
+    resp.extensions_mut().insert(label);
+    resp
 }
+
+/// Principal name attached to responses for request logs and the
+/// `kora_auth_rejections_total` metric. On a 401 it is the attempted name only
+/// when that principal exists (`unknown` otherwise, `anonymous` without
+/// credentials), so arbitrary usernames cannot blow up metric cardinality.
+#[derive(Debug, Clone)]
+pub struct PrincipalLabel(pub String);
 
 /// 401 with a basic-auth challenge so standard clients retry with credentials.
 fn unauthorized() -> Response {
@@ -172,6 +189,16 @@ pub enum AuthFailure {
     UnknownPrincipal,
     /// The principal exists but the password is wrong.
     WrongPassword(String),
+}
+
+impl AuthFailure {
+    fn label(self) -> PrincipalLabel {
+        PrincipalLabel(match self {
+            Self::MissingCredentials => "anonymous".to_owned(),
+            Self::UnknownPrincipal => "unknown".to_owned(),
+            Self::WrongPassword(name) => name,
+        })
+    }
 }
 
 /// Hash verified against when the principal does not exist, so unknown and
