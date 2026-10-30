@@ -53,6 +53,24 @@ pub struct KoraConfig {
     /// `COMPATIBILITY_LEVELS`.
     #[serde(default)]
     pub default_compatibility: Option<String>,
+    /// Require HTTP basic auth and enforce per-principal subject ACLs on every
+    /// API route except `/health` and `/metrics`. Off by default so existing
+    /// deployments keep working until they opt in.
+    #[serde(default)]
+    pub auth_enabled: bool,
+    /// How long a verified credential and a per-principal schema-ID read
+    /// decision stay cached, in seconds (`0` disables caching). Bounds how long
+    /// another replica keeps honouring a rotated or deleted principal.
+    #[serde(default = "default_auth_cache_ttl_secs")]
+    pub auth_cache_ttl_secs: u64,
+    /// Bootstrap admin login (`KORA_ADMIN_USERNAME`), reconciled on every
+    /// startup together with [`Self::admin_password`]. Read straight from the
+    /// environment, never serialized.
+    #[serde(skip)]
+    pub admin_username: Option<String>,
+    /// Bootstrap admin password (`KORA_ADMIN_PASSWORD`).
+    #[serde(skip)]
+    pub admin_password: Option<String>,
 }
 
 // -- Impls --
@@ -71,6 +89,10 @@ impl Default for KoraConfig {
             max_body_size: default_max_body_size(),
             db_pool_max: default_db_pool_max(),
             default_compatibility: None,
+            auth_enabled: false,
+            auth_cache_ttl_secs: default_auth_cache_ttl_secs(),
+            admin_username: None,
+            admin_password: None,
         }
     }
 }
@@ -80,7 +102,8 @@ impl KoraConfig {
     ///
     /// Recognized env vars: `DATABASE_URL`, `DB_HOST`, `DB_PORT`, `DB_USER`,
     /// `DB_PASSWORD`, `DB_NAME`, `HOST`, `PORT`, `MAX_BODY_SIZE`, `DB_POOL_MAX`,
-    /// `DEFAULT_COMPATIBILITY`.
+    /// `DEFAULT_COMPATIBILITY`, `AUTH_ENABLED`, `AUTH_CACHE_TTL_SECS`,
+    /// `KORA_ADMIN_USERNAME`, `KORA_ADMIN_PASSWORD`.
     ///
     /// An empty `DATABASE_URL` is composed from the `DB_*` components
     /// (user/password percent-encoded). A blank `DEFAULT_COMPATIBILITY` is
@@ -92,7 +115,8 @@ impl KoraConfig {
     /// is not a known level, if a removed Oracle selector is present
     /// (`DB_BACKEND` set to anything but `postgres`, or an `oracle://` URL), or
     /// if neither a connection URL nor a complete `DB_*` set (`DB_HOST`,
-    /// `DB_USER`, `DB_NAME`) is provided.
+    /// `DB_USER`, `DB_NAME`) is provided, or if only one of
+    /// `KORA_ADMIN_USERNAME` / `KORA_ADMIN_PASSWORD` is set.
     pub fn load() -> Result<Self, Box<figment::Error>> {
         let mut cfg: Self = Figment::from(Serialized::defaults(Self::default()))
             .merge(Env::raw().only(&[
@@ -106,6 +130,8 @@ impl KoraConfig {
                 "PORT",
                 "MAX_BODY_SIZE",
                 "DB_POOL_MAX",
+                "AUTH_ENABLED",
+                "AUTH_CACHE_TTL_SECS",
             ]))
             .extract()
             .map_err(Box::new)?;
@@ -113,8 +139,30 @@ impl KoraConfig {
         cfg.reject_removed_backend()?;
         cfg.resolve_default_compatibility()?;
         cfg.resolve_postgres()?;
+        cfg.resolve_admin()?;
 
         Ok(cfg)
+    }
+
+    /// Read the bootstrap admin credentials directly from the environment
+    /// (blank = unset) and require both or neither.
+    fn resolve_admin(&mut self) -> Result<(), Box<figment::Error>> {
+        let var = |key| {
+            std::env::var(key)
+                .ok()
+                .filter(|v: &String| !v.trim().is_empty())
+        };
+        self.admin_username = var("KORA_ADMIN_USERNAME").map(|v| v.trim().to_owned());
+        self.admin_password = var("KORA_ADMIN_PASSWORD");
+        match (&self.admin_username, &self.admin_password) {
+            (Some(_), None) => Err(Box::new(figment::Error::from(
+                "KORA_ADMIN_USERNAME is set but KORA_ADMIN_PASSWORD is not".to_owned(),
+            ))),
+            (None, Some(_)) => Err(Box::new(figment::Error::from(
+                "KORA_ADMIN_PASSWORD is set but KORA_ADMIN_USERNAME is not".to_owned(),
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// Fail fast on the removed Oracle backend selectors instead of silently
@@ -221,4 +269,8 @@ fn default_max_body_size() -> usize {
 
 fn default_db_pool_max() -> u32 {
     20
+}
+
+fn default_auth_cache_ttl_secs() -> u64 {
+    60
 }

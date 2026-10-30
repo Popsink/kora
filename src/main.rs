@@ -66,6 +66,20 @@ async fn main() {
         );
     }
 
+    // Reconcile the bootstrap admin: KORA_ADMIN_USERNAME / KORA_ADMIN_PASSWORD
+    // are the source of truth on every startup, like DEFAULT_COMPATIBILITY.
+    if let (Some(name), Some(password)) = (&cfg.admin_username, &cfg.admin_password) {
+        let changed = kora::auth::bootstrap_admin(&storage, name, password)
+            .await
+            .expect("failed to reconcile the bootstrap admin");
+        tracing::info!(principal = %name, changed, "reconciled bootstrap admin");
+    } else if cfg.auth_enabled {
+        tracing::warn!(
+            "AUTH_ENABLED is set without KORA_ADMIN_USERNAME / KORA_ADMIN_PASSWORD; \
+             only principals already stored in the database can authenticate"
+        );
+    }
+
     let app = api::router(storage, metrics_handle, cfg.max_body_size);
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr)
