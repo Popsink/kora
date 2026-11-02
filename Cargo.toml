@@ -9,7 +9,7 @@ async-trait = "0.1.83"
 axum = { version = "0.8.9", features = ["macros"] }
 figment = { version = "0.10.19", features = ["env"] }
 hex = "0.4"
-jsonschema = { version = "0.49.1", default-features = false }
+jsonschema = { version = "0.50.0", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 prost-types = "0.14.3"
