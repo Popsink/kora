@@ -18,10 +18,14 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
+use crate::auth::SubjectScope;
 use crate::config::KoraConfig;
 use crate::error::KoraError;
 use crate::types::SchemaReference;
-use types::{CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion};
+use types::{
+    CompatCheck, HardDeleteResult, NewPrincipal, NewSchema, PrincipalRecord, PrincipalUpdate,
+    SchemaVersion, SubjectVersion,
+};
 
 pub use backends::PgStorage;
 
@@ -107,7 +111,8 @@ pub trait Storage: Send + Sync + 'static {
 
     // -- Subjects --
 
-    /// List subject names, sorted alphabetically, with pagination.
+    /// List subject names, sorted alphabetically, with pagination. A `scope`
+    /// restricts the result to the subjects it covers.
     ///
     /// # Errors
     ///
@@ -117,6 +122,7 @@ pub trait Storage: Send + Sync + 'static {
         include_deleted: bool,
         deleted_only: bool,
         prefix: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<String>, KoraError>;
@@ -249,6 +255,7 @@ pub trait Storage: Send + Sync + 'static {
     async fn schema_exists(&self, id: i64) -> Result<bool, KoraError>;
 
     /// Find all subjects that use a given schema content ID, with pagination.
+    /// A `scope` restricts the result to the subjects it covers.
     ///
     /// # Errors
     ///
@@ -258,11 +265,13 @@ pub trait Storage: Send + Sync + 'static {
         id: i64,
         include_deleted: bool,
         subject_filter: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<String>, KoraError>;
 
     /// Find all subject-version pairs that use a given schema content ID.
+    /// A `scope` restricts the result to the subjects it covers.
     ///
     /// # Errors
     ///
@@ -272,6 +281,7 @@ pub trait Storage: Send + Sync + 'static {
         id: i64,
         include_deleted: bool,
         subject_filter: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<SubjectVersion>, KoraError>;
@@ -292,7 +302,8 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<Vec<i32>, KoraError>;
 
     /// List schemas across all subjects, with optional filtering and pagination.
-    /// References are not populated — the caller loads them separately.
+    /// References are not populated — the caller loads them separately. A
+    /// `scope` restricts the result to the subjects it covers.
     ///
     /// # Errors
     ///
@@ -302,9 +313,18 @@ pub trait Storage: Send + Sync + 'static {
         include_deleted: bool,
         latest_only: bool,
         prefix: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<SchemaVersion>, KoraError>;
+
+    /// Whether a schema content ID is registered (soft-deleted or not) under at
+    /// least one subject covered by `scope`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn schema_readable(&self, id: i64, scope: &SubjectScope) -> Result<bool, KoraError>;
 
     /// Soft-delete the latest schema version for a subject. Returns the version.
     ///
@@ -567,6 +587,50 @@ pub trait Storage: Send + Sync + 'static {
     ///
     /// Returns a database error on connection failure.
     async fn is_version_referenced(&self, subject: &str, version: i32) -> Result<bool, KoraError>;
+
+    // -- Principals --
+
+    /// List all principals, sorted by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn list_principals(&self) -> Result<Vec<PrincipalRecord>, KoraError>;
+
+    /// Find a principal by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn find_principal(&self, name: &str) -> Result<Option<PrincipalRecord>, KoraError>;
+
+    /// Create a principal. Returns `None` if the name is already taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn create_principal(
+        &self,
+        new: &NewPrincipal<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError>;
+
+    /// Apply a partial update to a principal. Returns `None` if it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn update_principal(
+        &self,
+        name: &str,
+        update: &PrincipalUpdate<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError>;
+
+    /// Delete a principal. Returns its ID, or `None` if it did not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on connection failure.
+    async fn delete_principal(&self, name: &str) -> Result<Option<i64>, KoraError>;
 }
 
 // -- Factory --

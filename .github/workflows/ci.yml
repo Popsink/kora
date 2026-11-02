@@ -134,6 +134,18 @@ jobs:
           grep -q 'name: my-secret' <<<"$out"
           grep -q 'key: "DATABASE_URL"' <<<"$out"
 
+      - name: Template (auth — bootstrap admin inline / existing secret)
+        run: |
+          out=$(helm template kora chart/ --set database.host=t --set database.password=t --set auth.enabled=true --set auth.admin.username=root --set auth.admin.password=pw)
+          grep -q 'name: kora-auth' <<<"$out"
+          grep -q 'name: KORA_ADMIN_PASSWORD' <<<"$out"
+          grep -A1 'name: AUTH_ENABLED' <<<"$out" | grep -q '"true"'
+          out=$(helm template kora chart/ --set database.host=t --set database.password=t --set auth.admin.username=root --set auth.admin.existingSecret=my-auth)
+          ! grep -q 'name: kora-auth' <<<"$out"
+          grep -q 'name: my-auth' <<<"$out"
+          out=$(helm template kora chart/ --set database.host=t --set database.password=t)
+          ! grep -q 'KORA_ADMIN' <<<"$out"
+
       - name: Template (mutually exclusive — must fail)
         run: |
           assert_fail() {
@@ -145,3 +157,5 @@ jobs:
           assert_fail 'mutually exclusive' --set database.url=postgres://u:p@h/d --set database.existingSecret=my-secret
           assert_fail 'mutually exclusive' --set database.host=h --set database.password=p --set database.existingSecret=my-secret
           assert_fail 'mutually exclusive' --set database.url=postgres://u:p@h/d --set database.password=p
+          assert_fail 'mutually exclusive' --set database.host=h --set database.password=p --set auth.admin.username=root --set auth.admin.password=p --set auth.admin.existingSecret=my-auth
+          assert_fail 'requires auth.admin.password' --set database.host=h --set database.password=p --set auth.admin.username=root

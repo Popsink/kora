@@ -77,3 +77,53 @@ pub enum HardDeleteResult {
     /// A still-active version references this subject, blocking deletion.
     ReferenceExists(String),
 }
+
+/// Data needed to create a principal.
+pub struct NewPrincipal<'a> {
+    /// Login name (unique).
+    pub name: &'a str,
+    /// Argon2 PHC string — never the clear-text password.
+    pub password_hash: &'a str,
+    /// Role.
+    pub role: crate::auth::Role,
+    /// Subject rules.
+    pub rules: &'a [crate::auth::Rule],
+}
+
+/// Partial update of a principal; `None` fields are left unchanged.
+#[derive(Default)]
+pub struct PrincipalUpdate<'a> {
+    /// New Argon2 PHC string (password rotation).
+    pub password_hash: Option<&'a str>,
+    /// New role.
+    pub role: Option<crate::auth::Role>,
+    /// Replacement rule list.
+    pub rules: Option<&'a [crate::auth::Rule]>,
+}
+
+/// A stored principal.
+#[derive(Debug, Clone)]
+pub struct PrincipalRecord {
+    /// Database ID.
+    pub id: i64,
+    /// Login name.
+    pub name: String,
+    /// Argon2 PHC string.
+    pub password_hash: String,
+    /// Role.
+    pub role: crate::auth::Role,
+    /// Subject rules.
+    pub rules: Vec<crate::auth::Rule>,
+    /// Creation time (RFC 3339, UTC).
+    pub created_at: String,
+    /// Last update time (RFC 3339, UTC).
+    pub updated_at: String,
+}
+
+impl PrincipalRecord {
+    /// The authenticated view of this record.
+    #[must_use]
+    pub fn to_principal(&self) -> crate::auth::Principal {
+        crate::auth::Principal::new(self.id, self.name.clone(), self.role, self.rules.clone())
+    }
+}
