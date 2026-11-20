@@ -3,52 +3,53 @@
 //! Simple reads run single statements over the pool; the two delete paths run
 //! in a transaction over the raw [`PgPool`](sqlx::PgPool).
 
+use crate::auth::SubjectScope;
 use crate::error::KoraError;
 use crate::storage::types::HardDeleteResult;
 
-use super::{PgStorage, like_pattern, paged};
+use super::{PgStorage, like_pattern, paged, scope_binds, scope_predicate};
 
 pub(super) async fn list_subjects(
     store: &PgStorage,
     include_deleted: bool,
     deleted_only: bool,
     prefix: Option<&str>,
+    scope: Option<&SubjectScope>,
     offset: i64,
     limit: i64,
 ) -> Result<Vec<String>, KoraError> {
     // Literal WHERE filter (one of three hardcoded literals) so PG can use its
     // partial indexes; binding the deleted flag here would prevent index usage.
-    let filter = if deleted_only {
-        "deleted = true"
+    let mut sql = String::from(if deleted_only {
+        "SELECT name FROM subjects WHERE deleted = true"
     } else if include_deleted {
-        "true"
+        "SELECT name FROM subjects WHERE true"
     } else {
-        "deleted = false"
-    };
-    // SAFETY (sqlx 0.9 `SqlSafeStr`): `sql` is built from hardcoded literals and
-    // internal pagination i64s; the LIKE pattern is bound, never spliced.
-    if let Some(pat) = like_pattern(prefix) {
-        let sql = paged(
-            &format!(
-                "SELECT name FROM subjects WHERE {filter} AND name LIKE $1 ESCAPE '\\' ORDER BY name"
-            ),
-            offset,
-            limit,
-        );
-        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
-            .bind(pat)
-            .fetch_all(store.pool())
-            .await?)
-    } else {
-        let sql = paged(
-            &format!("SELECT name FROM subjects WHERE {filter} ORDER BY name"),
-            offset,
-            limit,
-        );
-        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
-            .fetch_all(store.pool())
-            .await?)
+        "SELECT name FROM subjects WHERE deleted = false"
+    });
+    let pat = like_pattern(prefix);
+    let mut next = 1;
+    if pat.is_some() {
+        sql.push_str(" AND name LIKE $1 ESCAPE '\\'");
+        next = 2;
     }
+    if scope.is_some() {
+        sql.push_str(" AND ");
+        sql.push_str(&scope_predicate("name", next));
+    }
+    sql.push_str(" ORDER BY name");
+    // SAFETY (sqlx 0.9 `SqlSafeStr`): `sql` is built from hardcoded literals,
+    // bind placeholders and internal pagination i64s; the LIKE pattern and the
+    // scope are bound, never spliced.
+    let mut q = sqlx::query_scalar(sqlx::AssertSqlSafe(paged(&sql, offset, limit)));
+    if let Some(pat) = pat {
+        q = q.bind(pat);
+    }
+    if let Some(scope) = scope {
+        let (names, likes) = scope_binds(scope);
+        q = q.bind(names).bind(likes);
+    }
+    Ok(q.fetch_all(store.pool()).await?)
 }
 
 pub(super) async fn find_subject_id_by_name(

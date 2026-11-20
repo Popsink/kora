@@ -9,6 +9,7 @@ use axum::{
     response::IntoResponse,
 };
 
+use crate::api::auth::PrincipalLabel;
 use crate::error::CONTENT_TYPE_SCHEMA_REGISTRY;
 
 /// Middleware that normalizes case-insensitive boolean values in query strings.
@@ -80,7 +81,11 @@ pub async fn content_type_negotiation(
 ///
 /// Emits a structured log line per request using field names aligned with
 /// [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/specs/semconv/http/http-spans/):
-/// `http.method`, `http.route`, `http.status_code`, `url.path`, `latency_ms`.
+/// `http.method`, `http.route`, `http.status_code`, `url.path`, `latency_ms`,
+/// plus `principal` when authentication is enabled (never the password).
+///
+/// `401`/`403` responses also increment `kora_auth_rejections_total`, labelled
+/// by status and principal.
 ///
 /// Log levels: DEBUG for `/metrics` and `/health`, ERROR for 5xx, INFO for
 /// everything else (including 4xx — client errors are expected traffic).
@@ -98,6 +103,10 @@ pub async fn track_metrics(req: Request<axum::body::Body>, next: Next) -> impl I
     let elapsed = start.elapsed().as_secs_f64();
     let status_code = response.status().as_u16();
     let latency_ms = (elapsed * 1_000_000.0).round() / 1000.0;
+    let principal = response
+        .extensions()
+        .get::<PrincipalLabel>()
+        .map(|p| p.0.clone());
 
     // Log every request with OTel-aligned field names.
     // 5xx arm first so a failing /health is logged as ERROR, not DEBUG.
@@ -108,6 +117,7 @@ pub async fn track_metrics(req: Request<axum::body::Body>, next: Next) -> impl I
                 http.route = %route,
                 url.path = %uri,
                 http.status_code = status_code,
+                principal = principal.as_deref(),
                 latency_ms,
                 "request"
             );
@@ -118,6 +128,7 @@ pub async fn track_metrics(req: Request<axum::body::Body>, next: Next) -> impl I
                 http.route = %route,
                 url.path = %uri,
                 http.status_code = status_code,
+                principal = principal.as_deref(),
                 latency_ms,
                 "request"
             );
@@ -128,6 +139,7 @@ pub async fn track_metrics(req: Request<axum::body::Body>, next: Next) -> impl I
                 http.route = %route,
                 url.path = %uri,
                 http.status_code = status_code,
+                principal = principal.as_deref(),
                 latency_ms,
                 "request"
             );
@@ -140,6 +152,15 @@ pub async fn track_metrics(req: Request<axum::body::Body>, next: Next) -> impl I
     }
 
     let status_str = status_code.to_string();
+
+    if matches!(status_code, 401 | 403) {
+        metrics::counter!(
+            "kora_auth_rejections_total",
+            "status" => status_str.clone(),
+            "principal" => principal.unwrap_or_else(|| "anonymous".to_owned()),
+        )
+        .increment(1);
+    }
 
     metrics::counter!(
         "http_requests_total",

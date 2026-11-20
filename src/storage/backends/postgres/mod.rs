@@ -8,6 +8,7 @@
 
 pub mod compatibility;
 pub mod mode;
+pub mod principals;
 pub mod references;
 pub mod schemas;
 pub mod subjects;
@@ -15,9 +16,11 @@ pub mod subjects;
 use async_trait::async_trait;
 use sqlx::PgPool;
 
+use crate::auth::SubjectScope;
 use crate::error::KoraError;
 use crate::storage::types::{
-    CompatCheck, HardDeleteResult, NewSchema, SchemaVersion, SubjectVersion,
+    CompatCheck, HardDeleteResult, NewPrincipal, NewSchema, PrincipalRecord, PrincipalUpdate,
+    SchemaVersion, SubjectVersion,
 };
 use crate::storage::{PoolStats, Storage};
 use crate::types::SchemaReference;
@@ -76,13 +79,33 @@ pub(super) fn paged(base_sql: &str, offset: i64, limit: i64) -> String {
 
 /// Escape LIKE metacharacters and append `%`, mirroring the sibling modules.
 pub(super) fn like_pattern(prefix: Option<&str>) -> Option<String> {
-    prefix.filter(|p| !p.is_empty()).map(|p| {
-        let escaped = p
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        format!("{escaped}%")
-    })
+    prefix.filter(|p| !p.is_empty()).map(prefix_like)
+}
+
+/// LIKE pattern matching every string starting with `prefix` (`\` escapes).
+fn prefix_like(prefix: &str) -> String {
+    let escaped = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("{escaped}%")
+}
+
+/// SQL predicate keeping only the subjects of a [`SubjectScope`]: `column`
+/// equals one of the names bound as `$n`, or matches one of the LIKE patterns
+/// bound as `$n+1` (both bound via [`scope_binds`]). Postgres's default LIKE
+/// escape character is `\`, which [`prefix_like`] relies on.
+pub(super) fn scope_predicate(column: &str, n: usize) -> String {
+    format!("({column} = ANY(${n}) OR {column} LIKE ANY(${}))", n + 1)
+}
+
+/// Bind values for [`scope_predicate`]: the exact names, then the prefixes as
+/// escaped LIKE patterns.
+pub(super) fn scope_binds(scope: &SubjectScope) -> (Vec<String>, Vec<String>) {
+    (
+        scope.names.clone(),
+        scope.prefixes.iter().map(|p| prefix_like(p)).collect(),
+    )
 }
 
 #[async_trait]
@@ -125,10 +148,20 @@ impl Storage for PgStorage {
         include_deleted: bool,
         deleted_only: bool,
         prefix: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<String>, KoraError> {
-        subjects::list_subjects(self, include_deleted, deleted_only, prefix, offset, limit).await
+        subjects::list_subjects(
+            self,
+            include_deleted,
+            deleted_only,
+            prefix,
+            scope,
+            offset,
+            limit,
+        )
+        .await
     }
 
     async fn soft_delete_subject(&self, name: &str) -> Result<Vec<i32>, KoraError> {
@@ -227,6 +260,7 @@ impl Storage for PgStorage {
         id: i64,
         include_deleted: bool,
         subject_filter: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<String>, KoraError> {
@@ -235,6 +269,7 @@ impl Storage for PgStorage {
             id,
             include_deleted,
             subject_filter,
+            scope,
             offset,
             limit,
         )
@@ -246,6 +281,7 @@ impl Storage for PgStorage {
         id: i64,
         include_deleted: bool,
         subject_filter: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<SubjectVersion>, KoraError> {
@@ -254,6 +290,7 @@ impl Storage for PgStorage {
             id,
             include_deleted,
             subject_filter,
+            scope,
             offset,
             limit,
         )
@@ -286,10 +323,24 @@ impl Storage for PgStorage {
         include_deleted: bool,
         latest_only: bool,
         prefix: Option<&str>,
+        scope: Option<&SubjectScope>,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<SchemaVersion>, KoraError> {
-        schemas::list_schemas(self, include_deleted, latest_only, prefix, offset, limit).await
+        schemas::list_schemas(
+            self,
+            include_deleted,
+            latest_only,
+            prefix,
+            scope,
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    async fn schema_readable(&self, id: i64, scope: &SubjectScope) -> Result<bool, KoraError> {
+        schemas::schema_readable(self, id, scope).await
     }
 
     async fn soft_delete_latest_schema(&self, subject: &str) -> Result<Option<i32>, KoraError> {
@@ -448,5 +499,34 @@ impl Storage for PgStorage {
 
     async fn is_version_referenced(&self, subject: &str, version: i32) -> Result<bool, KoraError> {
         references::is_version_referenced(self, subject, version).await
+    }
+
+    // -- Principals --
+
+    async fn list_principals(&self) -> Result<Vec<PrincipalRecord>, KoraError> {
+        principals::list_principals(self).await
+    }
+
+    async fn find_principal(&self, name: &str) -> Result<Option<PrincipalRecord>, KoraError> {
+        principals::find_principal(self, name).await
+    }
+
+    async fn create_principal(
+        &self,
+        new: &NewPrincipal<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError> {
+        principals::create_principal(self, new).await
+    }
+
+    async fn update_principal(
+        &self,
+        name: &str,
+        update: &PrincipalUpdate<'_>,
+    ) -> Result<Option<PrincipalRecord>, KoraError> {
+        principals::update_principal(self, name, update).await
+    }
+
+    async fn delete_principal(&self, name: &str) -> Result<Option<i64>, KoraError> {
+        principals::delete_principal(self, name).await
     }
 }

@@ -15,6 +15,9 @@ fn config_defaults_applied() {
     assert!(cfg.database_url.is_empty());
     assert_eq!(cfg.db_pool_max, 20);
     assert_eq!(cfg.default_compatibility, None);
+    assert!(!cfg.auth_enabled);
+    assert_eq!(cfg.auth_cache_ttl_secs, 60);
+    assert_eq!(cfg.admin_username, None);
 }
 
 #[test]
@@ -204,6 +207,52 @@ fn load_rejects_bool_like_default_compatibility_with_friendly_error() {
 
         assert!(msg.contains("DEFAULT_COMPATIBILITY"), "{msg}");
         assert!(msg.contains("must be one of"), "{msg}");
+        Ok(())
+    });
+}
+
+#[test]
+fn load_reads_auth_settings() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("AUTH_ENABLED", "true");
+        jail.set_env("AUTH_CACHE_TTL_SECS", "5");
+        jail.set_env("KORA_ADMIN_USERNAME", " root ");
+        jail.set_env("KORA_ADMIN_PASSWORD", "s3cret");
+
+        let cfg = KoraConfig::load().expect("auth settings should load");
+
+        assert!(cfg.auth_enabled);
+        assert_eq!(cfg.auth_cache_ttl_secs, 5);
+        assert_eq!(cfg.admin_username.as_deref(), Some("root"));
+        assert_eq!(cfg.admin_password.as_deref(), Some("s3cret"));
+        Ok(())
+    });
+}
+
+#[test]
+fn load_rejects_admin_username_without_password() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("KORA_ADMIN_USERNAME", "root");
+        jail.set_env("KORA_ADMIN_PASSWORD", "");
+
+        let err = KoraConfig::load().expect_err("half-configured admin should fail");
+
+        assert!(err.to_string().contains("KORA_ADMIN_PASSWORD"), "{err}");
+        Ok(())
+    });
+}
+
+#[test]
+fn load_rejects_admin_password_without_username() {
+    Jail::expect_with(|jail| {
+        jail.set_env("DATABASE_URL", "postgres://from-env/db");
+        jail.set_env("KORA_ADMIN_PASSWORD", "s3cret");
+
+        let err = KoraConfig::load().expect_err("half-configured admin should fail");
+
+        assert!(err.to_string().contains("KORA_ADMIN_USERNAME"), "{err}");
         Ok(())
     });
 }

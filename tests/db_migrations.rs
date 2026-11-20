@@ -30,6 +30,10 @@ async fn migrations_create_all_tables() {
         "missing schema_references table"
     );
     assert!(table_names.contains(&"config"), "missing config table");
+    assert!(
+        table_names.contains(&"principals"),
+        "missing principals table"
+    );
 }
 
 #[tokio::test]

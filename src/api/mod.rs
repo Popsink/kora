@@ -1,5 +1,7 @@
 //! API route construction.
 
+pub mod admin;
+pub mod auth;
 pub mod compatibility;
 pub mod health;
 pub mod metrics;
@@ -12,22 +14,24 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, FromRef},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::storage::DynStorage;
+use auth::AuthState;
 
 // -- State --
 
 /// Shared application state extracted by handlers via axum's `State`.
 ///
 /// `FromRef` lets handlers extract `State<DynStorage>` (the backend-agnostic
-/// storage handle) and `State<PrometheusHandle>` directly.
+/// storage handle), `State<PrometheusHandle>` and `State<AuthState>` directly.
 #[derive(Clone, FromRef)]
 struct AppState {
     storage: DynStorage,
     metrics_handle: PrometheusHandle,
+    auth: AuthState,
 }
 
 // -- Router --
@@ -37,21 +41,25 @@ async fn root() -> impl IntoResponse {
     Json(serde_json::json!({}))
 }
 
-/// Build the application router with all routes.
+/// Build the application router with all routes. Pass
+/// [`AuthState::disabled`] to serve without authentication.
 pub fn router(
     storage: DynStorage,
     metrics_handle: PrometheusHandle,
     max_body_size: usize,
+    auth: AuthState,
 ) -> Router {
     let state = AppState {
         storage,
         metrics_handle,
+        auth,
     };
 
-    // API routes get the Confluent content-type header.
+    // API routes get the Confluent content-type header. Every route added
+    // before the `auth::enforce` layer requires authentication (when enabled);
+    // `/health` is added after it so probes stay unauthenticated.
     let api = Router::new()
         .route("/", get(root).post(root))
-        .route("/health", get(health::check_health))
         .route("/schemas", get(schemas::list_schemas))
         .route("/schemas/ids/{id}", get(schemas::get_schema_by_id))
         .route(
@@ -120,6 +128,21 @@ pub fn router(
                 .put(mode::set_subject_mode)
                 .delete(mode::delete_subject_mode),
         )
+        .route(
+            "/admin/principals",
+            get(admin::list_principals).post(admin::create_principal),
+        )
+        .route(
+            "/admin/principals/{name}",
+            patch(admin::update_principal)
+                .get(admin::get_principal)
+                .delete(admin::delete_principal),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.auth.clone(),
+            auth::enforce,
+        ))
+        .route("/health", get(health::check_health))
         .layer(axum::middleware::from_fn(
             middleware::content_type_negotiation,
         ))

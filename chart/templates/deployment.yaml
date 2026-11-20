@@ -22,6 +22,7 @@ spec:
     metadata:
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/auth-secret: {{ include (print $.Template.BasePath "/auth-secret.yaml") . | sha256sum }}
         {{- if .Values.podAnnotations }}
         {{- include "common.tplvalues.render" (dict "value" .Values.podAnnotations "context" $) | nindent 8 }}
         {{- end }}
@@ -97,6 +98,19 @@ spec:
             {{- if .Values.kora.defaultCompatibility }}
             - name: DEFAULT_COMPATIBILITY
               value: {{ .Values.kora.defaultCompatibility | quote }}
+            {{- end }}
+            - name: AUTH_ENABLED
+              value: {{ .Values.auth.enabled | quote }}
+            - name: AUTH_CACHE_TTL_SECS
+              value: {{ .Values.auth.cacheTtlSeconds | int | quote }}
+            {{- if .Values.auth.admin.username }}
+            - name: KORA_ADMIN_USERNAME
+              value: {{ .Values.auth.admin.username | quote }}
+            - name: KORA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kora.authSecretName" . }}
+                  key: {{ .Values.auth.admin.secretKeys.password | quote }}
             {{- end }}
             {{- if .Values.kora.extraEnvVars }}
             {{- include "common.tplvalues.render" (dict "value" .Values.kora.extraEnvVars "context" $) | nindent 12 }}

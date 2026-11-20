@@ -130,6 +130,27 @@ resources:
 | `kora.extraEnvVarsCM` | `""` | ConfigMap with extra env vars |
 | `kora.extraEnvVarsSecret` | `""` | Secret with extra env vars |
 
+### Authentication
+
+| Parameter | Default | Description |
+|---|---|---|
+| `auth.enabled` | `false` | Require HTTP basic auth and enforce per-principal subject ACLs (`AUTH_ENABLED`). `/health` and `/metrics` stay unauthenticated, so probes and the ServiceMonitor keep working |
+| `auth.cacheTtlSeconds` | `60` | Per-replica cache TTL for verified credentials and schema-ID read decisions (`AUTH_CACHE_TTL_SECS`, `0` disables). Bounds how long other replicas honour a rotated or deleted principal |
+| `auth.admin.username` | `""` | Bootstrap admin, reconciled on every startup (`KORA_ADMIN_USERNAME`). Empty = no bootstrap admin |
+| `auth.admin.password` | `""` | Bootstrap admin password, stored in an auto-created `<fullname>-auth` Secret |
+| `auth.admin.existingSecret` | `""` | Existing Secret holding the bootstrap admin password (mutually exclusive with `auth.admin.password`) |
+| `auth.admin.secretKeys.password` | `admin-password` | Key of the password in the Secret |
+
+Tenants are managed at runtime through the admin API (`/admin/principals`), see the [main README](../README.md#authentication-and-multi-tenancy).
+
+```yaml
+auth:
+  enabled: true
+  admin:
+    username: kora-admin
+    existingSecret: kora-admin-credentials   # key: admin-password
+```
+
 ### Database
 
 | Parameter | Default | Description |
